@@ -1,0 +1,20 @@
+# Configuration Fly.io pour l’application Discord Bot. Modifiez la valeur
+# `app` avec le nom que vous choisirez lors de `fly launch`. Ce fichier
+# indique également à Fly de monter un volume persistant à `/data` afin
+# que les fichiers de configuration (permissions et état du bot) soient
+# conservés entre les redémarrages. La variable d’environnement DATA_DIR
+# est définie sur `/data` pour diriger le bot vers ce répertoire.
+
+app = "nom-de-votre-bot"
+
+[build]
+  # Le Dockerfile fourni est utilisé par défaut; aucune configuration
+  # supplémentaire n’est requise ici.
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[env]
+  NODE_ENV = "production"
+  DATA_DIR = "/data"
