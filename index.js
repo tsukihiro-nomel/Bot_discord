@@ -15,6 +15,39 @@ const {
   AttachmentBuilder,
 } = require('discord.js');
 
+// ------------------------------------------------------------
+// Render compatibility: tiny HTTP server for health checks
+// ------------------------------------------------------------
+// On Render's Free Web Service, the instance spins down after ~15 minutes
+// without inbound HTTP traffic. A Discord bot maintains an outbound gateway
+// connection, but that doesn't count as inbound web traffic. Exposing a small
+// HTTP endpoint lets you ping it (e.g., with UptimeRobot) so the service stays
+// awake and your bot remains connected.
+//
+// Ping: https://<your-service>.onrender.com/health
+// You can change the path with HEALTH_PATH.
+const http = require('http');
+const RENDER_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const HEALTH_PATH = process.env.HEALTH_PATH || '/health';
+
+const healthServer = http.createServer((req, res) => {
+  if (!req || !req.url) {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ok');
+  }
+  if (req.url === HEALTH_PATH) {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ok');
+  }
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  return res.end('running');
+});
+
+healthServer.listen(RENDER_PORT, '0.0.0.0', () => {
+  console.log(`[health] listening on 0.0.0.0:${RENDER_PORT} (${HEALTH_PATH})`);
+});
+
+
 /*
  * Ultra Discord Bot
  *
@@ -1506,6 +1539,33 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+
+// ------------------------------------------------------------
+// Clean shutdown (Render sends SIGTERM on deploy/stop)
+// ------------------------------------------------------------
+async function shutdown(signal) {
+  console.log(`[shutdown] received ${signal}, closing Discord client...`);
+  try {
+    healthServer.close();
+  } catch (_) {}
+  try {
+    await client.destroy();
+  } catch (_) {}
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Helpful diagnostics in hosted environments
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
+
 
 // On ready, initialise watchers and backup schedules
 client.once('ready', () => {
