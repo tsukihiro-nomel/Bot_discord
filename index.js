@@ -29,6 +29,13 @@ const {
 const http = require('http');
 const RENDER_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const HEALTH_PATH = process.env.HEALTH_PATH || '/health';
+const POLL_INTERVAL_MS = (() => {
+  const raw = process.env.POLL_INTERVAL_MS;
+  const parsed = raw ? parseInt(raw, 10) : 5 * 60 * 1000;
+  if (Number.isNaN(parsed) || parsed < 60_000) return 5 * 60 * 1000;
+  return parsed;
+})();
+const botStartedAt = Date.now();
 
 const healthServer = http.createServer((req, res) => {
   if (!req || !req.url) {
@@ -627,7 +634,11 @@ async function sendYouTubeNotification(guildId, discordChannelId, item) {
   if (!discordChannelId) return;
   try {
     const channel = await client.channels.fetch(discordChannelId);
-    if (!channel) return;
+    const guild = client.guilds.cache.get(guildId);
+    if (!channel || !guild || !canSendEmbeds(channel, guild)) {
+      await log(guildId, "Impossible d'envoyer la notification YouTube (salon invalide ou permissions manquantes).");
+      return;
+    }
     const snippet = item.snippet;
     const videoId = item.id.videoId;
     const embed = new EmbedBuilder()
@@ -721,7 +732,11 @@ async function sendTwitchNotification(guildId, channelId, stream) {
   if (!channelId) return;
   try {
     const channel = await client.channels.fetch(channelId);
-    if (!channel) return;
+    const guild = client.guilds.cache.get(guildId);
+    if (!channel || !guild || !canSendEmbeds(channel, guild)) {
+      await log(guildId, "Impossible d'envoyer la notification Twitch (salon invalide ou permissions manquantes).");
+      return;
+    }
     const thumbnail = stream.thumbnail_url
       ? stream.thumbnail_url.replace('{width}', '1280').replace('{height}', '720')
       : null;
@@ -909,6 +924,17 @@ function registerCommand(name, level, handler) {
   commands[name] = { level, handler };
 }
 
+function canSendEmbeds(channel, guild) {
+  if (!channel || typeof channel.permissionsFor !== 'function') return false;
+  const perms = channel.permissionsFor(guild.members.me);
+  return Boolean(
+    perms
+      && perms.has(PermissionsBitField.Flags.ViewChannel)
+      && perms.has(PermissionsBitField.Flags.SendMessages)
+      && perms.has(PermissionsBitField.Flags.EmbedLinks),
+  );
+}
+
 // Command: analyze / export
 registerCommand('analyze', 1, async (message, args) => {
   const guild = message.guild;
@@ -1033,6 +1059,10 @@ registerCommand('youtube', 1, async (message, args) => {
     const channelMention = args.shift();
     const announceId = channelMention.replace(/<#(\d+)>/, '$1');
     ytCfg.enabled = true;
+    const exists = ytCfg.channels.some(c => c.id === channelId && c.announceChannelId === announceId);
+    if (exists) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Cette chaîne YouTube est déjà configurée pour ce salon.')] });
+    }
     ytCfg.channels.push({ id: channelId, announceChannelId: announceId });
     persist();
     return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Chaîne YouTube **${channelId}** ajoutée. Les notifications seront publiées dans <#${announceId}>.`)] });
@@ -1338,7 +1368,7 @@ registerCommand('permissions', 1, async (message, args) => {
         .addFields(
           { name: 'Gérer rôles', value: perms.has(PermissionsBitField.Flags.ManageRoles) ? '✅' : '❌' },
           { name: 'Gérer salons', value: perms.has(PermissionsBitField.Flags.ManageChannels) ? '✅' : '❌' },
-          { name: 'Gérer permissions', value: perms.has(PermissionsBitField.Flags.ManagePermissions || PermissionsBitField.Flags.ManageGuildExpressions) ? '✅' : '❌' },
+          { name: 'Gérer permissions de salons', value: perms.has(PermissionsBitField.Flags.ManageChannels) ? '✅' : '❌' },
         );
       return message.reply({ embeds: [embed] });
     } else {
@@ -1404,7 +1434,7 @@ registerCommand('status', 1, async (message, args) => {
   const guildCfg = ensureGuildConfig(message.guild.id);
   const embed = new EmbedBuilder().setColor(0x34495e).setTitle('Statut du bot');
   embed.addFields(
-    { name: 'Uptime', value: `<t:${Math.floor(process.uptime())}:R>` },
+    { name: 'Uptime', value: `<t:${Math.floor(botStartedAt / 1000)}:R>` },
     { name: 'Latency', value: `${Math.round(client.ws.ping)} ms` },
     { name: 'YouTube', value: guildCfg.featureToggles.youtube ? `${guildCfg.modules.youtube.channels.length} chaînes` : 'OFF' },
     { name: 'Twitch', value: guildCfg.featureToggles.twitch ? `${Object.keys(guildCfg.modules.twitch.streamers).length} streamers` : 'OFF' },
@@ -1570,9 +1600,11 @@ process.on('uncaughtException', (err) => {
 // On ready, initialise watchers and backup schedules
 client.once('ready', () => {
   console.log(`Connecté en tant que ${client.user.tag}`);
-  // Start periodic tasks with a base polling interval of 5 minutes
-  setInterval(pollYouTube, 5 * 60 * 1000);
-  setInterval(pollTwitch, 5 * 60 * 1000);
+  // Start periodic tasks with a configurable polling interval
+  setInterval(pollYouTube, POLL_INTERVAL_MS);
+  setInterval(pollTwitch, POLL_INTERVAL_MS);
+  pollYouTube().catch(err => console.error('[pollYouTube] first run failed:', err));
+  pollTwitch().catch(err => console.error('[pollTwitch] first run failed:', err));
   // Start backup schedules for all guilds
   for (const guild of client.guilds.cache.values()) {
     ensureGuildConfig(guild.id);
