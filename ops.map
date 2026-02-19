@@ -1,0 +1,27 @@
+# verb:type = handler:param1,param2,...
+
+# No-op (template)
+keep:* = noop:
+
+# Channels / Categories
+rename:channel = channel.rename:id,name
+move:channel = channel.move:id,parent
+topic:channel = channel.topic:id,topic
+slowmode:channel = channel.slowmode:id,seconds
+nsfw:channel = channel.nsfw:id,enabled
+create:channel = channel.create:name,ctype,parent
+delete:channel = channel.delete:id
+
+# Category (optionnel mais pratique)
+rename:category = channel.rename:id,name
+create:category = category.create:name
+delete:category = channel.delete:id
+
+# Roles
+rename:role = role.rename:id,name
+create:role = role.create:name,color,hoist,mentionable
+delete:role = role.delete:id
+
+# Permissions overwrites
+perm:set = perm.set:channel,role,allow,deny
+perm:remove = perm.remove:channel,role
