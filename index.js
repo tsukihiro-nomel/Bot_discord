@@ -14,6 +14,14 @@ const {
   EmbedBuilder,
   AttachmentBuilder,
 } = require('discord.js');
+const {
+  loadOpsMap,
+  parsePatchScript,
+  applyActions,
+  buildPlanSummary,
+  makeConfirmCode,
+  buildTemplateForGuild,
+} = require('./patchEngine');
 
 // ------------------------------------------------------------
 // Render compatibility: tiny HTTP server for health checks
@@ -94,6 +102,9 @@ const configPaths = {
   config: path.join(dataDir, 'config.json'),
   state: path.join(dataDir, 'state.json'),
 };
+
+const OPS_PATH = path.join(__dirname, 'ops.map');
+let opsMap = loadOpsMap(OPS_PATH);
 
 /**
  * Load JSON data from disk.  If the file cannot be read or parsed, the
@@ -917,6 +928,10 @@ function substituteTemplate(text, guild, member, channel) {
  */
 
 const PREFIX = '!';
+const pendingPatches = new Map();
+const PATCH_CONFIRM_TTL_MS = 10 * 60 * 1000;
+const PATCH_MAX_ACTIONS = process.env.PATCH_MAX_ACTIONS ? parseInt(process.env.PATCH_MAX_ACTIONS, 10) : 500;
+const PATCH_ALLOW_DELETES_DEFAULT = (process.env.PATCH_ALLOW_DELETES || '').toLowerCase() === 'true';
 
 const commands = {};
 
@@ -1471,6 +1486,120 @@ registerCommand('resetconfig', 3, async (message) => {
  * description and the required permission level.  For detailed help
  * invocation use !help <commande>.
  */
+
+registerCommand('opsreload', 3, async (message) => {
+  opsMap = loadOpsMap(OPS_PATH);
+  await message.reply({ embeds: [new EmbedBuilder().setTitle('Ops reloaded').setDescription('ops.map rechargé.')] });
+});
+
+registerCommand('patch', 3, async (message, args) => {
+  const guild = message.guild;
+  const sub = (args[0] || '').toLowerCase();
+
+  if (!sub || sub === 'help') {
+    const txt = [
+      '**Patch system**',
+      '`!patch export` → génère un template .sawa',
+      '`!patch plan` + fichier .sawa → dry-run + code de confirmation',
+      '`!patch apply <CODE> [--allow-deletes]` → applique',
+      '`!patch cancel` → annule le patch en attente',
+    ].join('\n');
+    return message.reply({ embeds: [new EmbedBuilder().setTitle('Patch Help').setDescription(txt)] });
+  }
+
+  if (sub === 'export') {
+    const template = buildTemplateForGuild(guild);
+    const buf = Buffer.from(template, 'utf8');
+    const att = new AttachmentBuilder(buf, { name: `patch-template-${guild.id}.sawa` });
+    return message.reply({
+      embeds: [new EmbedBuilder().setTitle('Patch Template').setDescription('Télécharge, modifie, puis envoie avec `!patch plan`.')],
+      files: [att],
+    });
+  }
+
+  if (sub === 'cancel') {
+    pendingPatches.delete(guild.id);
+    return message.reply({ embeds: [new EmbedBuilder().setTitle('Patch annulé').setDescription('Aucun patch en attente.')] });
+  }
+
+  if (sub === 'plan') {
+    const attachment = message.attachments.first();
+    if (!attachment) {
+      return message.reply({ embeds: [new EmbedBuilder().setTitle('Erreur').setDescription('Ajoute ton fichier `.sawa` en pièce jointe.')] });
+    }
+
+    const res = await fetch(attachment.url);
+    const text = await res.text();
+
+    const { actions, errors } = parsePatchScript(text, opsMap, { maxActions: PATCH_MAX_ACTIONS });
+    if (errors.length) {
+      const errTxt = errors.slice(0, 15).map(e => `• ${e}`).join('\n');
+      return message.reply({ embeds: [new EmbedBuilder().setTitle('Patch invalide').setDescription(errTxt)] });
+    }
+
+    const hasDeletes = actions.some(a => a.handler === 'channel.delete' || a.handler === 'role.delete');
+    const code = makeConfirmCode();
+
+    pendingPatches.set(guild.id, {
+      code,
+      actions,
+      createdAt: Date.now(),
+      hasDeletes,
+    });
+
+    const summary = buildPlanSummary(actions);
+    const warn = hasDeletes ? '\n\n⚠️ Ce patch contient des suppressions (delete). Pour autoriser: `!patch apply <CODE> --allow-deletes`' : '';
+    return message.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Patch PLAN (dry-run)')
+          .setDescription(`${summary}\n\n**CONFIRM CODE:** \`${code}\`${warn}`)
+          .setFooter({ text: `Expire dans ${Math.floor(PATCH_CONFIRM_TTL_MS / 60000)} min` }),
+      ],
+    });
+  }
+
+  if (sub === 'apply') {
+    const code = (args[1] || '').toUpperCase();
+    const allowDeletes = args.includes('--allow-deletes') || PATCH_ALLOW_DELETES_DEFAULT;
+
+    const pending = pendingPatches.get(guild.id);
+    if (!pending) {
+      return message.reply({ embeds: [new EmbedBuilder().setTitle('Erreur').setDescription('Aucun patch en attente. Fais `!patch plan` d’abord.')] });
+    }
+
+    if (Date.now() - pending.createdAt > PATCH_CONFIRM_TTL_MS) {
+      pendingPatches.delete(guild.id);
+      return message.reply({ embeds: [new EmbedBuilder().setTitle('Expiré').setDescription('Le patch a expiré. Refais `!patch plan`.')] });
+    }
+
+    if (pending.code !== code) {
+      return message.reply({ embeds: [new EmbedBuilder().setTitle('Code invalide').setDescription('Mauvais confirm code.')] });
+    }
+
+    if (pending.hasDeletes && !allowDeletes) {
+      return message.reply({
+        embeds: [new EmbedBuilder().setTitle('Suppression bloquée').setDescription('Ce patch contient des delete. Relance avec `--allow-deletes`.')],
+      });
+    }
+
+    const reason = `Patch apply by ${message.author.tag}`;
+    const results = await applyActions(guild, pending.actions, { reason });
+
+    pendingPatches.delete(guild.id);
+
+    const ok = results.filter(r => r.ok).length;
+    const ko = results.filter(r => !r.ok).length;
+
+    const firstErrors = results.filter(r => !r.ok).slice(0, 10).map(r => `• L${r.line} ${r.handler}: ${r.error}`).join('\n');
+    const desc = `✅ Réussites: **${ok}**\n❌ Échecs: **${ko}**${firstErrors ? `\n\n**Erreurs (extrait)**\n${firstErrors}` : ''}`;
+
+    return message.reply({ embeds: [new EmbedBuilder().setTitle('Patch APPLY terminé').setDescription(desc)] });
+  }
+
+  return message.reply({ embeds: [new EmbedBuilder().setTitle('Erreur').setDescription('Sous-commande inconnue. `!patch help`')] });
+});
+
 registerCommand('help', 0, async (message, args) => {
   const userLevel = getUserLevel(message.member);
   const embed = new EmbedBuilder().setColor(0x1abc9c);
