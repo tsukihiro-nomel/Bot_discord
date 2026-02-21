@@ -13,7 +13,12 @@ const {
   PermissionsBitField,
   EmbedBuilder,
   AttachmentBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
 } = require('discord.js');
+const { THEME, buildEmbed, clampStr } = require('./ui');
 const {
   loadOpsMap,
   parsePatchScript,
@@ -163,11 +168,48 @@ function defaultGuildConfig() {
       welcome: { enabled: false, channelId: null, message: 'Bienvenue sur {server}, {user} !' },
       rules: { enabled: false, title: 'Règles', content: 'Aucune règle définie.' },
       logs: { enabled: false, channelId: null },
+      suggestions: { enabled: false, channelId: null },
+      polls: { enabled: true },
     },
     roleLevels: {},
-    featureToggles: { youtube: true, twitch: true, backups: true, templates: true, welcome: true, rules: true, logs: true },
+    featureToggles: {
+      youtube: true,
+      twitch: true,
+      backups: true,
+      templates: true,
+      welcome: true,
+      rules: true,
+      logs: true,
+      suggestions: true,
+      polls: true,
+      utility: true,
+      fun: true,
+    },
     antiSpam: {}, // per‑channel last send timestamps
   };
+}
+
+function migrateGuildConfig(guildCfg) {
+  const def = defaultGuildConfig();
+  if (!guildCfg.modules) guildCfg.modules = {};
+  if (!guildCfg.roleLevels) guildCfg.roleLevels = {};
+  if (!guildCfg.featureToggles) guildCfg.featureToggles = {};
+  if (!guildCfg.antiSpam) guildCfg.antiSpam = {};
+
+  for (const [k, v] of Object.entries(def.modules)) {
+    if (!guildCfg.modules[k]) guildCfg.modules[k] = v;
+    else {
+      for (const [subk, subv] of Object.entries(v)) {
+        if (guildCfg.modules[k][subk] === undefined) guildCfg.modules[k][subk] = subv;
+      }
+    }
+  }
+
+  for (const [k, v] of Object.entries(def.featureToggles)) {
+    if (guildCfg.featureToggles[k] === undefined) guildCfg.featureToggles[k] = v;
+  }
+
+  return guildCfg;
 }
 
 /**
@@ -181,6 +223,8 @@ function defaultGuildConfig() {
 function ensureGuildConfig(guildId) {
   if (!config[guildId]) {
     config[guildId] = defaultGuildConfig();
+  } else {
+    config[guildId] = migrateGuildConfig(config[guildId]);
   }
   if (!state[guildId]) {
     state[guildId] = { youtube: {}, twitch: {} };
@@ -933,6 +977,29 @@ const PATCH_CONFIRM_TTL_MS = 10 * 60 * 1000;
 const PATCH_MAX_ACTIONS = process.env.PATCH_MAX_ACTIONS ? parseInt(process.env.PATCH_MAX_ACTIONS, 10) : 500;
 const PATCH_ALLOW_DELETES_DEFAULT = (process.env.PATCH_ALLOW_DELETES || '').toLowerCase() === 'true';
 
+const POLL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SUGGEST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+const interactive = {
+  polls: new Map(),
+  suggestions: new Map(),
+};
+
+function shortId(len = 8) {
+  return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
+}
+
+function cleanupInteractiveStore() {
+  const now = Date.now();
+  for (const [id, p] of interactive.polls.entries()) {
+    if (now - (p.createdAt || now) > POLL_TTL_MS) interactive.polls.delete(id);
+  }
+  for (const [id, s] of interactive.suggestions.entries()) {
+    if (now - (s.createdAt || now) > SUGGEST_TTL_MS) interactive.suggestions.delete(id);
+  }
+}
+setInterval(cleanupInteractiveStore, 60 * 60 * 1000);
+
 const commands = {};
 
 function registerCommand(name, level, handler) {
@@ -948,6 +1015,45 @@ function canSendEmbeds(channel, guild) {
       && perms.has(PermissionsBitField.Flags.SendMessages)
       && perms.has(PermissionsBitField.Flags.EmbedLinks),
   );
+}
+
+function makeBotEmbed(kind, guild, title, description, fields) {
+  return buildEmbed(kind, { client, guild, title, description, fields });
+}
+
+async function replyBot(message, kind, title, description, fields) {
+  return message.reply({ embeds: [makeBotEmbed(kind, message.guild, title, description, fields)] });
+}
+
+function moduleEnabled(guildCfg, name) {
+  return Boolean(guildCfg?.featureToggles?.[name]);
+}
+
+function resolveTargetUser(message, token) {
+  if (!token && message.mentions.users.size) return message.mentions.users.first();
+  if (!token) return message.author;
+  const id = token.replace(/[<@!>]/g, '');
+  return message.client.users.cache.get(id) || null;
+}
+
+function buildPollEmbed(guild, poll) {
+  const counts = poll.options.map((_, idx) => [...poll.votes.values()].filter(v => v === idx).length);
+  const total = counts.reduce((a, b) => a + b, 0);
+  return makeBotEmbed('info', guild, `${THEME.emoji.vote} Sondage`, clampStr(poll.question, 300), poll.options.map((opt, idx) => ({
+    name: `${idx + 1}. ${clampStr(opt, 120)}`,
+    value: `Votes: **${counts[idx]}**${total ? ` (${Math.round((counts[idx] / total) * 100)}%)` : ''}`,
+    inline: true,
+  })));
+}
+
+function buildSuggestionEmbed(guild, suggestion) {
+  return makeBotEmbed('neutral', guild, `${THEME.emoji.idea} Suggestion`, clampStr(suggestion.content, 3000), [
+    {
+      name: 'Votes',
+      value: `👍 ${suggestion.up.size} • 👎 ${suggestion.down.size}`,
+      inline: false,
+    },
+  ]);
 }
 
 // Command: analyze / export
@@ -1368,6 +1474,142 @@ registerCommand('feature', 3, async (message, args) => {
   }
 });
 
+registerCommand('ping', 0, async (message) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'utility')) {
+    return replyBot(message, 'warn', 'Module utility désactivé', 'Active avec `!feature enable utility`.');
+  }
+  const sent = await message.reply({ embeds: [makeBotEmbed('info', message.guild, 'Pong...', 'Mesure en cours...')] });
+  const latency = sent.createdTimestamp - message.createdTimestamp;
+  return sent.edit({ embeds: [makeBotEmbed('success', message.guild, '🏓 Pong', undefined, [
+    { name: 'Latence message', value: `${latency} ms`, inline: true },
+    { name: 'Ping WebSocket', value: `${Math.round(client.ws.ping)} ms`, inline: true },
+  ])] });
+});
+
+registerCommand('avatar', 0, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'utility')) {
+    return replyBot(message, 'warn', 'Module utility désactivé', 'Active avec `!feature enable utility`.');
+  }
+  const user = resolveTargetUser(message, args[0]) || message.author;
+  const url = user.displayAvatarURL({ size: 4096, extension: 'png' });
+  return message.reply({ embeds: [makeBotEmbed('info', message.guild, `Avatar de ${user.tag}`, `[Ouvrir en HD](${url})`).setImage(url)] });
+});
+
+registerCommand('userinfo', 0, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'utility')) {
+    return replyBot(message, 'warn', 'Module utility désactivé', 'Active avec `!feature enable utility`.');
+  }
+  const user = resolveTargetUser(message, args[0]) || message.author;
+  const member = await message.guild.members.fetch(user.id).catch(() => null);
+  const roles = member ? member.roles.cache.filter(r => r.id !== message.guild.id).map(r => `<@&${r.id}>`).slice(0, 20) : [];
+  return replyBot(message, 'info', `Utilisateur: ${user.tag}`, undefined, [
+    { name: 'ID', value: user.id, inline: true },
+    { name: 'Compte créé le', value: `<t:${Math.floor(user.createdTimestamp / 1000)}:F>`, inline: true },
+    { name: 'A rejoint le', value: member ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:F>` : 'N/A', inline: true },
+    { name: 'Rôles', value: roles.join(', ') || 'Aucun', inline: false },
+  ]);
+});
+
+registerCommand('serverinfo', 0, async (message) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'utility')) {
+    return replyBot(message, 'warn', 'Module utility désactivé', 'Active avec `!feature enable utility`.');
+  }
+  const g = message.guild;
+  const text = g.channels.cache.filter(c => c.isTextBased()).size;
+  const voice = g.channels.cache.filter(c => c.type === ChannelType.GuildVoice).size;
+  const category = g.channels.cache.filter(c => c.type === ChannelType.GuildCategory).size;
+  return replyBot(message, 'info', `Infos serveur: ${g.name}`, undefined, [
+    { name: 'Owner', value: `<@${g.ownerId}>`, inline: true },
+    { name: 'Membres', value: `${g.memberCount}`, inline: true },
+    { name: 'Rôles', value: `${g.roles.cache.size}`, inline: true },
+    { name: 'Salons', value: `Texte: ${text}\nVocal: ${voice}\nCatégories: ${category}`, inline: false },
+  ]);
+});
+
+registerCommand('poll', 0, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'polls')) {
+    return replyBot(message, 'warn', 'Module polls désactivé', 'Active avec `!feature enable polls`.');
+  }
+  const raw = args.join(' ').split('|').map(s => s.trim()).filter(Boolean);
+  if (raw.length < 3) return replyBot(message, 'warn', 'Utilisation', '`!poll Question | Option 1 | Option 2` (2 à 5 options).');
+  const question = raw.shift();
+  const options = raw.slice(0, 5);
+  if (options.length < 2) return replyBot(message, 'warn', 'Sondage invalide', 'Il faut au moins 2 options.');
+  const pollId = shortId();
+  const poll = {
+    messageId: null,
+    channelId: message.channel.id,
+    guildId: message.guild.id,
+    question,
+    options,
+    votes: new Map(),
+    createdAt: Date.now(),
+  };
+  const row = new ActionRowBuilder().addComponents(options.map((opt, idx) => new ButtonBuilder()
+    .setCustomId(`poll:${pollId}:${idx}`)
+    .setLabel(`${idx + 1}`)
+    .setStyle(ButtonStyle.Primary)));
+  const msg = await message.reply({ embeds: [buildPollEmbed(message.guild, poll)], components: [row] });
+  poll.messageId = msg.id;
+  interactive.polls.set(pollId, poll);
+});
+
+registerCommand('suggest', 0, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'suggestions')) {
+    return replyBot(message, 'warn', 'Module suggestions désactivé', 'Active avec `!feature enable suggestions`.');
+  }
+  const sub = (args[0] || '').toLowerCase();
+  const userLevel = getUserLevel(message.member);
+  if (sub === 'set') {
+    if (userLevel < 2) return replyBot(message, 'error', 'Permission refusée', 'Niveau 2 requis.');
+    const channelId = (args[1] || '').replace(/<#(\d+)>/, '$1');
+    const channel = message.guild.channels.cache.get(channelId);
+    if (!channel) return replyBot(message, 'warn', 'Salon invalide', 'Utilise `!suggest set #salon`.');
+    guildCfg.modules.suggestions.enabled = true;
+    guildCfg.modules.suggestions.channelId = channelId;
+    persist();
+    return replyBot(message, 'success', 'Suggestions configurées', `Salon défini sur <#${channelId}>.`);
+  }
+  if (sub === 'off') {
+    if (userLevel < 2) return replyBot(message, 'error', 'Permission refusée', 'Niveau 2 requis.');
+    guildCfg.modules.suggestions.enabled = false;
+    guildCfg.modules.suggestions.channelId = null;
+    persist();
+    return replyBot(message, 'success', 'Suggestions désactivées', 'Le module suggestions est coupé.');
+  }
+  if (!guildCfg.modules.suggestions.enabled || !guildCfg.modules.suggestions.channelId) {
+    return replyBot(message, 'warn', 'Suggestions non configurées', 'Configure un salon avec `!suggest set #salon`.');
+  }
+  const content = args.join(' ').trim();
+  if (!content) return replyBot(message, 'warn', 'Utilisation', '`!suggest Mon idée...`');
+  const targetChannel = message.guild.channels.cache.get(guildCfg.modules.suggestions.channelId);
+  if (!targetChannel) return replyBot(message, 'error', 'Salon introuvable', 'Reconfigure avec `!suggest set #salon`.');
+  const sugId = shortId();
+  const sug = {
+    messageId: null,
+    channelId: targetChannel.id,
+    guildId: message.guild.id,
+    content: `${content}\n\n— proposé par <@${message.author.id}>`,
+    up: new Set(),
+    down: new Set(),
+    createdAt: Date.now(),
+  };
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`suggest:${sugId}:up`).setEmoji('👍').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`suggest:${sugId}:down`).setEmoji('👎').setStyle(ButtonStyle.Danger),
+  );
+  const posted = await targetChannel.send({ embeds: [buildSuggestionEmbed(message.guild, sug)], components: [row] });
+  sug.messageId = posted.id;
+  interactive.suggestions.set(sugId, sug);
+  return replyBot(message, 'success', 'Suggestion envoyée', `Postée dans <#${targetChannel.id}>.`);
+});
+
 /*
  * Permission diagnostics command
  */
@@ -1600,26 +1842,48 @@ registerCommand('patch', 3, async (message, args) => {
   return message.reply({ embeds: [new EmbedBuilder().setTitle('Erreur').setDescription('Sous-commande inconnue. `!patch help`')] });
 });
 
+function buildHelpCategoryEmbed(category, guild, userLevel, guildCfg) {
+  const catalog = {
+    all: ['help', 'ping', 'avatar', 'userinfo', 'serverinfo', 'youtube', 'twitch', 'backup', 'template', 'welcome', 'rules', 'feature', 'setlog', 'status', 'poll', 'suggest', 'analyze', 'import', 'export', 'setlevel', 'listlevels', 'permissions', 'config', 'resetconfig', 'patch'],
+    core: ['help', 'status', 'config', 'feature', 'setlevel', 'listlevels', 'permissions', 'resetconfig'],
+    notifs: ['youtube', 'twitch', 'welcome', 'setlog'],
+    patch: ['patch', 'analyze', 'import', 'export', 'backup', 'template', 'rules'],
+    outils: ['ping', 'avatar', 'userinfo', 'serverinfo', 'poll', 'suggest'],
+    social: ['welcome', 'rules', 'suggest'],
+  };
+  const cmds = catalog[category] || catalog.all;
+  const lines = cmds
+    .filter((name) => commands[name] && commands[name].level <= userLevel)
+    .filter((name) => {
+      const modMap = {
+        youtube: 'youtube', twitch: 'twitch', backup: 'backups', template: 'templates', welcome: 'welcome',
+        rules: 'rules', setlog: 'logs', poll: 'polls', suggest: 'suggestions', ping: 'utility', avatar: 'utility',
+        userinfo: 'utility', serverinfo: 'utility',
+      };
+      const mod = modMap[name];
+      return !mod || moduleEnabled(guildCfg, mod);
+    })
+    .map(name => `• **${PREFIX}${name}**`);
+  return makeBotEmbed('info', guild, `${THEME.emoji.list} Aide (${category})`, lines.join('\n') || 'Aucune commande visible.');
+}
+
 registerCommand('help', 0, async (message, args) => {
   const userLevel = getUserLevel(message.member);
-  const embed = new EmbedBuilder().setColor(0x1abc9c);
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const embed = makeBotEmbed('info', message.guild, 'Aide – Commandes disponibles');
   if (args.length === 0) {
-    embed.setTitle('Aide – Commandes disponibles');
-    const lines = [];
-    for (const [name, cmd] of Object.entries(commands)) {
-      if (cmd.level <= userLevel) {
-        // hide module specific commands if the module is disabled
-        if (['youtube', 'twitch', 'backup', 'template', 'welcome', 'rules', 'feature', 'setlog', 'status'].includes(name)) {
-          const mod = name === 'setlog' ? 'logs' : name;
-          const guildCfg = ensureGuildConfig(message.guild.id);
-          if (!guildCfg.featureToggles[mod]) continue;
-        }
-        lines.push(`• **${PREFIX}${name}**`);
-      }
-    }
-    embed.setDescription(lines.join('\n'));
-    embed.setFooter({ text: `Tapez ${PREFIX}help <commande> pour plus de détails.` });
-    return message.reply({ embeds: [embed] });
+    embed.setDescription('Choisis une catégorie avec les boutons.\nOu tape `!help <commande>` pour le détail.');
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`help:all:${message.author.id}`).setLabel('Tout').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`help:core:${message.author.id}`).setLabel('Core').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`help:notifs:${message.author.id}`).setLabel('Notifs').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`help:patch:${message.author.id}`).setLabel('Patch').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`help:outils:${message.author.id}`).setLabel('Outils').setStyle(ButtonStyle.Secondary),
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`help:social:${message.author.id}`).setLabel('Social').setStyle(ButtonStyle.Secondary),
+    );
+    return message.reply({ embeds: [buildHelpCategoryEmbed('all', message.guild, userLevel, guildCfg)], components: [row, row2] });
   } else {
     const cmdName = args.shift().toLowerCase();
     const cmd = commands[cmdName];
@@ -1761,9 +2025,66 @@ async function handleGuildMemberAdd(member) {
 
 client.on('guildMemberAdd', handleGuildMemberAdd);
 
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  const [kind, id, arg] = (interaction.customId || '').split(':');
+
+  if (kind === 'help') {
+    const category = id;
+    const authorId = arg;
+    if (interaction.user.id !== authorId) {
+      return interaction.reply({ content: 'Ce menu help n\'est pas pour toi.', ephemeral: true });
+    }
+    const guildCfg = ensureGuildConfig(interaction.guild.id);
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const level = getUserLevel(member);
+    return interaction.update({ embeds: [buildHelpCategoryEmbed(category, interaction.guild, level, guildCfg)] });
+  }
+
+  if (kind === 'poll') {
+    const poll = interactive.polls.get(id);
+    if (!poll) return interaction.reply({ content: 'Sondage expiré.', ephemeral: true });
+    const idx = parseInt(arg, 10);
+    if (Number.isNaN(idx)) return interaction.reply({ content: 'Vote invalide.', ephemeral: true });
+    poll.votes.set(interaction.user.id, idx);
+    const row = new ActionRowBuilder().addComponents(poll.options.map((opt, i) => new ButtonBuilder()
+      .setCustomId(`poll:${id}:${i}`)
+      .setLabel(`${i + 1}`)
+      .setStyle(ButtonStyle.Primary)));
+    await interaction.update({ embeds: [buildPollEmbed(interaction.guild, poll)], components: [row] });
+    return interaction.followUp({ content: 'Vote enregistré.', ephemeral: true });
+  }
+
+  if (kind === 'suggest') {
+    const sug = interactive.suggestions.get(id);
+    if (!sug) return interaction.reply({ content: 'Suggestion expirée.', ephemeral: true });
+    const action = arg;
+    if (action === 'up') {
+      if (sug.up.has(interaction.user.id)) sug.up.delete(interaction.user.id);
+      else {
+        sug.down.delete(interaction.user.id);
+        sug.up.add(interaction.user.id);
+      }
+    } else if (action === 'down') {
+      if (sug.down.has(interaction.user.id)) sug.down.delete(interaction.user.id);
+      else {
+        sug.up.delete(interaction.user.id);
+        sug.down.add(interaction.user.id);
+      }
+    }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`suggest:${id}:up`).setEmoji('👍').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`suggest:${id}:down`).setEmoji('👎').setStyle(ButtonStyle.Danger),
+    );
+    await interaction.update({ embeds: [buildSuggestionEmbed(interaction.guild, sug)], components: [row] });
+    return interaction.followUp({ content: 'Vote pris en compte !', ephemeral: true });
+  }
+});
+
 // Process commands
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
+  if (!message.guild) return;
   if (!message.content.startsWith(PREFIX)) return;
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
