@@ -19,6 +19,14 @@ const {
   ComponentType,
 } = require('discord.js');
 const { THEME, buildEmbed, clampStr } = require('./ui');
+const { parseCommandContent } = require('./commandParser');
+const {
+  parseChannelMention,
+  parseMessageLink,
+  parseBool,
+  parseOptions,
+  buildEmbedsFromSpec,
+} = require('./embedKit');
 const {
   loadOpsMap,
   parsePatchScript,
@@ -170,6 +178,7 @@ function defaultGuildConfig() {
       logs: { enabled: false, channelId: null },
       suggestions: { enabled: false, channelId: null },
       polls: { enabled: true },
+      embeds: { enabled: true, presets: {}, defaultPreset: null },
     },
     roleLevels: {},
     featureToggles: {
@@ -182,6 +191,7 @@ function defaultGuildConfig() {
       logs: true,
       suggestions: true,
       polls: true,
+      embeds: true,
       utility: true,
       fun: true,
     },
@@ -1002,8 +1012,8 @@ setInterval(cleanupInteractiveStore, 60 * 60 * 1000);
 
 const commands = {};
 
-function registerCommand(name, level, handler) {
-  commands[name] = { level, handler };
+function registerCommand(name, level, handler, options = {}) {
+  commands[name] = { level, handler, wantsRaw: Boolean(options.wantsRaw) };
 }
 
 function canSendEmbeds(channel, guild) {
@@ -1139,27 +1149,132 @@ registerCommand('listlevels', 1, async (message) => {
 });
 
 // Command: sendembed
-registerCommand('sendembed', 1, async (message, args) => {
-  // Usage: !sendembed #salon Titre | Description
+registerCommand('sendembed', 1, async (message, args, rawArgs) => {
   if (args.length < 2) {
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !sendembed #salon Titre | Description')] });
+    return replyBot(message, 'warn', 'Utilisation', '!sendembed #salon <embedSpec>');
   }
-  const channelMention = args.shift();
-  const channelId = channelMention.replace(/<#(\d+)>/, '$1');
+
+  const [channelToken] = args;
+  const channelId = parseChannelMention(channelToken);
+  if (!channelId) return replyBot(message, 'warn', 'Salon invalide', 'Mentionne un salon avec `#salon`.');
+
   const channel = message.guild.channels.cache.get(channelId);
-  if (!channel) {
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Salon introuvable.')] });
+  if (!channel || !channel.isTextBased()) return replyBot(message, 'warn', 'Salon introuvable', 'Vérifie le salon cible.');
+  if (!canSendEmbeds(channel, message.guild)) return replyBot(message, 'error', 'Permissions insuffisantes', "Je ne peux pas envoyer d'embed dans ce salon.");
+
+  const spec = String(rawArgs || '').replace(/^\s*<#[0-9]+>\s*/, '');
+  if (!spec.trim()) return replyBot(message, 'warn', 'Embed manquant', 'Ajoute un embedSpec après le salon.');
+
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const embedsCfg = guildCfg.modules.embeds;
+  const built = buildEmbedsFromSpec(spec, {
+    presets: embedsCfg.presets || {},
+    defaultPreset: embedsCfg.defaultPreset || null,
+  });
+  if (built.error) return replyBot(message, 'error', "Impossible de parser l'embed", built.error);
+
+  await channel.send({ embeds: built.embeds, allowedMentions: { parse: [] } });
+  return replyBot(message, 'success', 'Message envoyé', 'Message envoyé ✅');
+}, { wantsRaw: true });
+
+registerCommand('editembed', 2, async (message, args, rawArgs) => {
+  if (args.length < 2) return replyBot(message, 'warn', 'Utilisation', '!editembed <messageId|messageLink> <embedSpec>');
+
+  const target = args[0];
+  const link = parseMessageLink(target);
+  let channel = message.channel;
+  let messageId = target;
+
+  if (link) {
+    if (link.guildId !== message.guild.id) return replyBot(message, 'warn', 'Lien invalide', 'Le lien doit pointer sur ce serveur.');
+    channel = message.guild.channels.cache.get(link.channelId);
+    messageId = link.messageId;
   }
-  const text = args.join(' ');
-  const parts = text.split('|');
-  const title = parts[0].trim();
-  const description = parts[1] ? parts[1].trim() : '';
-  const embed = new EmbedBuilder().setColor(0x95a5a6);
-  if (title) embed.setTitle(title);
-  if (description) embed.setDescription(description);
-  await channel.send({ embeds: [embed] });
-  return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('Message envoyé ✅')] });
-});
+
+  if (!channel || !channel.isTextBased()) return replyBot(message, 'warn', 'Salon invalide', 'Impossible de récupérer ce message.');
+
+  const targetMessage = await channel.messages.fetch(messageId).catch(() => null);
+  if (!targetMessage) return replyBot(message, 'warn', 'Message introuvable', 'ID/lien incorrect.');
+  if (targetMessage.author.id !== client.user.id) return replyBot(message, 'error', 'Refusé', 'Je peux éditer uniquement mes propres messages.');
+
+  const spec = String(rawArgs || '').replace(/^\s*\S+\s*/, '');
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const embedsCfg = guildCfg.modules.embeds;
+  const built = buildEmbedsFromSpec(spec, {
+    presets: embedsCfg.presets || {},
+    defaultPreset: embedsCfg.defaultPreset || null,
+  });
+  if (built.error) return replyBot(message, 'error', "Impossible de parser l'embed", built.error);
+
+  await targetMessage.edit({ embeds: built.embeds, allowedMentions: { parse: [] } });
+  return replyBot(message, 'success', 'Embed modifié', `Message ${targetMessage.id} modifié.`);
+}, { wantsRaw: true });
+
+registerCommand('embedpreset', 2, async (message, args, rawArgs) => {
+  const sub = (args.shift() || '').toLowerCase();
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const embedsCfg = guildCfg.modules.embeds;
+  embedsCfg.enabled = true;
+  embedsCfg.presets = embedsCfg.presets || {};
+
+  if (sub === 'set') {
+    const name = (args.shift() || '').toLowerCase();
+    if (!name) return replyBot(message, 'warn', 'Utilisation', '!embedpreset set <nom> || options...');
+    const optionsRaw = String(rawArgs || '').replace(/^\s*set\s+\S+\s*\|\|?\s*/i, '');
+    const options = parseOptions(optionsRaw);
+    embedsCfg.presets[name] = {
+      color: options.color,
+      thumbnail: options.thumbnail,
+      image: options.image,
+      footer: options.footer,
+      timestamp: parseBool(options.timestamp, null),
+      author: options.author,
+      authorIcon: options.authorIcon,
+      authorUrl: options.authorUrl,
+      url: options.url,
+      fields: options.fields || [],
+    };
+    persist();
+    return replyBot(message, 'success', 'Preset sauvegardé', `Preset **${name}** enregistré.`);
+  }
+
+  if (sub === 'show') {
+    const name = (args.shift() || '').toLowerCase();
+    const preset = embedsCfg.presets[name];
+    if (!preset) return replyBot(message, 'warn', 'Introuvable', 'Preset absent.');
+    return replyBot(message, 'info', `Preset ${name}`, '```json\n' + clampStr(JSON.stringify(preset, null, 2), 3800) + '\n```');
+  }
+
+  if (sub === 'list') {
+    const names = Object.keys(embedsCfg.presets);
+    if (!names.length) return replyBot(message, 'warn', 'Aucun preset', 'Crée-en avec `!embedpreset set`');
+    return replyBot(message, 'info', 'Presets', names.join(', '));
+  }
+
+  if (sub === 'delete') {
+    const name = (args.shift() || '').toLowerCase();
+    if (!embedsCfg.presets[name]) return replyBot(message, 'warn', 'Introuvable', 'Preset absent.');
+    delete embedsCfg.presets[name];
+    if (embedsCfg.defaultPreset === name) embedsCfg.defaultPreset = null;
+    persist();
+    return replyBot(message, 'success', 'Preset supprimé', `Preset **${name}** supprimé.`);
+  }
+
+  if (sub === 'default') {
+    const val = (args.shift() || '').toLowerCase();
+    if (!val || val === 'off') {
+      embedsCfg.defaultPreset = null;
+      persist();
+      return replyBot(message, 'success', 'Preset par défaut', 'Désactivé.');
+    }
+    if (!embedsCfg.presets[val]) return replyBot(message, 'warn', 'Introuvable', 'Preset absent.');
+    embedsCfg.defaultPreset = val;
+    persist();
+    return replyBot(message, 'success', 'Preset par défaut', `Preset **${val}** défini par défaut.`);
+  }
+
+  return replyBot(message, 'warn', 'Utilisation', 'Sous-commandes: set, show, list, delete, default');
+}, { wantsRaw: true });
 
 /*
  * YouTube commands
@@ -1302,7 +1417,7 @@ registerCommand('backup', 3, async (message, args) => {
 /*
  * Template commands
  */
-registerCommand('template', 1, async (message, args) => {
+registerCommand('template', 1, async (message, args, rawArgs) => {
   const sub = args.shift();
   const guildCfg = ensureGuildConfig(message.guild.id);
   const tplCfg = guildCfg.modules.templates;
@@ -1312,7 +1427,7 @@ registerCommand('template', 1, async (message, args) => {
       return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !template save <nom> Titre | Contenu')] });
     }
     const name = args.shift().toLowerCase();
-    const text = args.join(' ');
+    const text = String(rawArgs || '').replace(/^\s*set\s*/i, '');
     const parts = text.split('|');
     const title = parts[0].trim();
     const content = parts[1] ? parts[1].trim() : '';
@@ -1375,7 +1490,7 @@ registerCommand('template', 1, async (message, args) => {
 /*
  * Welcome commands
  */
-registerCommand('welcome', 1, async (message, args) => {
+registerCommand('welcome', 1, async (message, args, rawArgs) => {
   const sub = args.shift();
   const guildCfg = ensureGuildConfig(message.guild.id);
   const wCfg = guildCfg.modules.welcome;
@@ -1389,7 +1504,7 @@ registerCommand('welcome', 1, async (message, args) => {
     return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Salon d’accueil défini sur <#${channelId}>.`)] });
   } else if (sub === 'message') {
     // Usage: !welcome message "texte"
-    const msg = args.join(' ').replace(/^"|"$/g, '');
+    const msg = String(rawArgs || '').replace(/^\s*message\s*/i, '').replace(/^"|"$/g, '');
     wCfg.message = msg;
     wCfg.enabled = true;
     persist();
@@ -1411,7 +1526,7 @@ registerCommand('welcome', 1, async (message, args) => {
 /*
  * Rules commands
  */
-registerCommand('rules', 1, async (message, args) => {
+registerCommand('rules', 1, async (message, args, rawArgs) => {
   const sub = args.shift();
   const guildCfg = ensureGuildConfig(message.guild.id);
   const rulesCfg = guildCfg.modules.rules;
@@ -1424,7 +1539,7 @@ registerCommand('rules', 1, async (message, args) => {
   }
   if (sub === 'set') {
     // Usage: !rules set Titre | Contenu
-    const text = args.join(' ');
+    const text = String(rawArgs || '').replace(/^\s*set\s*/i, '');
     const parts = text.split('|');
     const title = parts[0].trim();
     const content = parts[1] ? parts[1].trim() : '';
@@ -1844,11 +1959,11 @@ registerCommand('patch', 3, async (message, args) => {
 
 function buildHelpCategoryEmbed(category, guild, userLevel, guildCfg) {
   const catalog = {
-    all: ['help', 'ping', 'avatar', 'userinfo', 'serverinfo', 'youtube', 'twitch', 'backup', 'template', 'welcome', 'rules', 'feature', 'setlog', 'status', 'poll', 'suggest', 'analyze', 'import', 'export', 'setlevel', 'listlevels', 'permissions', 'config', 'resetconfig', 'patch'],
+    all: ['help', 'ping', 'avatar', 'userinfo', 'serverinfo', 'youtube', 'twitch', 'backup', 'template', 'welcome', 'rules', 'sendembed', 'editembed', 'embedpreset', 'feature', 'setlog', 'status', 'poll', 'suggest', 'analyze', 'import', 'export', 'setlevel', 'listlevels', 'permissions', 'config', 'resetconfig', 'patch'],
     core: ['help', 'status', 'config', 'feature', 'setlevel', 'listlevels', 'permissions', 'resetconfig'],
     notifs: ['youtube', 'twitch', 'welcome', 'setlog'],
     patch: ['patch', 'analyze', 'import', 'export', 'backup', 'template', 'rules'],
-    outils: ['ping', 'avatar', 'userinfo', 'serverinfo', 'poll', 'suggest'],
+    outils: ['ping', 'avatar', 'userinfo', 'serverinfo', 'poll', 'suggest', 'sendembed', 'editembed', 'embedpreset'],
     social: ['welcome', 'rules', 'suggest'],
   };
   const cmds = catalog[category] || catalog.all;
@@ -1858,7 +1973,7 @@ function buildHelpCategoryEmbed(category, guild, userLevel, guildCfg) {
       const modMap = {
         youtube: 'youtube', twitch: 'twitch', backup: 'backups', template: 'templates', welcome: 'welcome',
         rules: 'rules', setlog: 'logs', poll: 'polls', suggest: 'suggestions', ping: 'utility', avatar: 'utility',
-        userinfo: 'utility', serverinfo: 'utility',
+        userinfo: 'utility', serverinfo: 'utility', sendembed: 'embeds', editembed: 'embeds', embedpreset: 'embeds',
       };
       const mod = modMap[name];
       return !mod || moduleEnabled(guildCfg, mod);
@@ -1905,7 +2020,13 @@ registerCommand('help', 0, async (message, args) => {
         desc = 'Affiche la liste des rôles configurés avec leur niveau.';
         break;
       case 'sendembed':
-        desc = 'Envoie un embed personnalisé dans un salon. Utilisation: `!sendembed #salon Titre | Description`';
+        desc = 'Envoie un embed personnalisé (multiline/JSON/options). Utilisation: `!sendembed #salon <embedSpec>`';
+        break;
+      case 'editembed':
+        desc = 'Édite un message embed envoyé par le bot. Utilisation: `!editembed <messageId|messageLink> <embedSpec>`';
+        break;
+      case 'embedpreset':
+        desc = "Gère les presets d'embed. Sous-commandes: set, show, list, delete, default.";
         break;
       case 'youtube':
         desc = 'Gère les notifications YouTube. Sous‑commandes: add <channelId> #salon, remove <channelId>, list.';
@@ -2086,16 +2207,24 @@ client.on('messageCreate', async message => {
   if (message.author.bot) return;
   if (!message.guild) return;
   if (!message.content.startsWith(PREFIX)) return;
-  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command = args.shift().toLowerCase();
+
+  const parsed = parseCommandContent(message.content, PREFIX);
+  if (!parsed) return;
+
+  const { command, args, rawArgs } = parsed;
   const cmdEntry = commands[command];
-  if (!cmdEntry) return; // unknown command
+  if (!cmdEntry) return;
+
   const userLevel = getUserLevel(message.member);
   if (cmdEntry.level > userLevel) {
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0xff5555).setDescription('Vous n\'avez pas la permission d\'utiliser cette commande.')] });
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0xff5555).setDescription("Vous n'avez pas la permission d'utiliser cette commande.")] });
   }
   try {
-    await cmdEntry.handler(message, args);
+    if (cmdEntry.wantsRaw || cmdEntry.handler.length >= 3) {
+      await cmdEntry.handler(message, args, rawArgs);
+    } else {
+      await cmdEntry.handler(message, args);
+    }
   } catch (err) {
     console.error(err);
     await message.reply({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setDescription('Une erreur inattendue est survenue.')] });

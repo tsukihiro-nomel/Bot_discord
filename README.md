@@ -99,3 +99,47 @@ Votes:
 - `config.json` / `state.json` persistés selon ton `DATA_DIR`.
 - Polls/Suggestions interactifs: **mémoire volatile** (v1, Render Free friendly).
 
+
+## Embeds: syntaxe avancée
+
+### `!sendembed #salon <embedSpec>`
+
+Modes supportés:
+
+1. **Texte**: `Titre | Description` (multiline supporté).
+2. **JSON** dans codeblock:
+   ````
+   !sendembed #annonces ```json
+   { "title": "X", "description": "A\nB", "color": "#FFB7DE" }
+   ```
+   ````
+
+Options avancées via `||`:
+
+```
+!sendembed #annonces Titre | Desc
+|| --color #FFB7DE --footer "Le Carnet" --timestamp off
+|| --author "Sawa" --authorIcon https://... --authorUrl https://...
+|| --thumbnail https://... --image https://... --url https://...
+|| --field "CPU::30%::true" --field "RAM::2GB::true"
+```
+
+- `--preset <nom>` applique un preset.
+- `--timestamp on|off`
+- Les descriptions > 4096 caractères sont automatiquement découpées en plusieurs embeds.
+- Les publications utilisent `allowedMentions: { parse: [] }` (pas de ping `@everyone/@here`).
+
+### `!editembed`
+
+- `!editembed <messageId> <embedSpec>`
+- `!editembed <messageLink> <embedSpec>`
+
+Le bot refuse d'éditer un message qui ne lui appartient pas.
+
+### `!embedpreset`
+
+- `!embedpreset set <nom> || options...`
+- `!embedpreset show <nom>`
+- `!embedpreset list`
+- `!embedpreset delete <nom>`
+- `!embedpreset default <nom|off>`
