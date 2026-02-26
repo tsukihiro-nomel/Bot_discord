@@ -4,7 +4,8 @@
   "description": "Bot Discord pour notifications YouTube/Twitch, analyse et recréation de serveur, et commandes personnalisées.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "discord.js": "^14.13.0"
