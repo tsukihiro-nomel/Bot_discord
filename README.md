@@ -40,7 +40,7 @@ Niveaux basés rôles:
 - `!feature enable <module>`
 - `!feature disable <module>`
 
-Modules: `youtube`, `twitch`, `backups`, `templates`, `welcome`, `rules`, `logs`, `suggestions`, `polls`, `utility`, `fun`.
+Modules: `youtube`, `shorts`, `twitch`, `autopublish`, `tickets`, `backups`, `templates`, `welcome`, `rules`, `logs`, `suggestions`, `polls`, `embeds`, `utility`, `fun`.
 
 ## Aide UI modernisée
 
@@ -56,6 +56,40 @@ Modules: `youtube`, `twitch`, `backups`, `templates`, `welcome`, `rules`, `logs`
 - `!serverinfo`
 
 > Si `utility` est OFF: message explicite pour activer `!feature enable utility`.
+
+## Auto Publish
+
+- `!autopublish on`
+- `!autopublish off`
+- `!autopublish status`
+
+Quand le module est actif, le bot publie automatiquement les nouveaux messages envoyés dans les salons Discord de type Announcement.
+
+Pré-requis:
+
+- module `autopublish` activé
+- permission Discord `Manage Messages` sur le salon Announcement
+
+Limite:
+
+- Discord limite la publication à `10` annonces par heure et par serveur; le bot applique ce garde-fou aussi
+
+## Tickets
+
+- `!ticketpanel`
+- `!ticket status`
+- `!ticket close`
+- `!ticket claim`
+- `!ticket reopen`
+
+Le bot inclut un panel tickets style "Le Carnet de Sawa" avec :
+
+- menu deroulant unique
+- types `support`, `signalement`, `collab`, `staff`, `autre`
+- modals courts
+- permissions privees createur + roles staff
+- transcript HTML envoye dans le salon staff configure
+- DM a l'ouverture et au transcript si actif
 
 ## Polls (RAM, non persistants)
 

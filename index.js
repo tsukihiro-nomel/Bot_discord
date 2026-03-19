@@ -17,6 +17,10 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const { THEME, buildEmbed, clampStr } = require('./ui');
 const { parseCommandContent } = require('./commandParser');
@@ -35,6 +39,7 @@ const {
   makeConfirmCode,
   buildTemplateForGuild,
 } = require('./patchEngine');
+const slashCommandDefs = require('./slashCommands');
 
 // ------------------------------------------------------------
 // Render compatibility: tiny HTTP server for health checks
@@ -119,6 +124,96 @@ const configPaths = {
 const OPS_PATH = path.join(__dirname, 'ops.map');
 let opsMap = loadOpsMap(OPS_PATH);
 
+const SAWA_GUILD_ID = '1118826910437347348';
+const SAWA_LOGS_CHANNEL_ID = '1474092653325979678';
+const SAWA_SUPPORT_ALERT_CHANNEL_ID = '1483876875544694903';
+const SAWA_TICKET_DEFAULTS = {
+  enabled: true,
+  panelChannelId: '1119946805522731061',
+  panelMessageId: null,
+  openCategoryId: '1119944142492012544',
+  closedCategoryId: '1483878040974000292',
+  transcriptsChannelId: '1483878205030006835',
+  logsChannelId: SAWA_LOGS_CHANNEL_ID,
+  creatorRoleId: null,
+  verifiedRoleId: '1119269512882176125',
+  openCooldownMs: 60_000,
+  maxOpenPerUser: 2,
+  dmOnOpen: true,
+  dmTranscript: true,
+};
+const SAWA_ADMIN_ROLE_IDS = [
+  '1328310491038351471',
+  '1328310384007970888',
+  '1119267312780967966',
+  '1118835561868824637',
+  '1118834640296349696',
+];
+const SAWA_TICKET_TYPES = {
+  'sawa-support': {
+    label: '🐾 Support',
+    emoji: '🐾',
+    description: 'Aide technique, question ou souci sur le serveur.',
+    pingRoles: ['1328310491038351471'],
+    adminRoles: SAWA_ADMIN_ROLE_IDS,
+    questions: [
+      { id: 'q_support_subject', label: 'Probleme resume', style: TextInputStyle.Short, required: true, placeholder: 'Probleme (resume)' },
+      { id: 'q_support_details', label: 'Explique ce qui se passe', style: TextInputStyle.Paragraph, required: true, placeholder: 'Explique ce qui se passe' },
+      { id: 'q_support_links', label: 'Lien ou capture', style: TextInputStyle.Short, required: false, placeholder: 'Lien / capture (si besoin)' },
+    ],
+  },
+  'sawa-report': {
+    label: '🚨 Signalement',
+    emoji: '🚨',
+    description: 'Signaler un membre, un message ou une situation.',
+    pingRoles: ['1119267312780967966'],
+    adminRoles: ['1119267312780967966', '1119267076960432209', '1118835561868824637', '1118834640296349696'],
+    questions: [
+      { id: 'q_report_who', label: 'Qui est concerne', style: TextInputStyle.Short, required: true, placeholder: 'Pseudo + ID' },
+      { id: 'q_report_what', label: 'Que sest il passe', style: TextInputStyle.Paragraph, required: true, placeholder: 'Decris les faits' },
+      { id: 'q_report_proof', label: 'Preuve', style: TextInputStyle.Short, required: false, placeholder: 'Lien / capture' },
+    ],
+  },
+  'sawa-collab': {
+    label: '🤝 Collab',
+    emoji: '🤝',
+    description: 'Proposer une collaboration ou un projet commun.',
+    pingRoles: ['1328310384007970888'],
+    adminRoles: ['1328310384007970888', '1119267989083148298', '1119267472353284299', '1118835561868824637', '1118834640296349696'],
+    requiresVerified: true,
+    questions: [
+      { id: 'q_collab_platform', label: 'Plateforme et lien', style: TextInputStyle.Short, required: true, placeholder: 'Twitch / YT / autre + lien' },
+      { id: 'q_collab_idea', label: 'Idee de collab', style: TextInputStyle.Paragraph, required: true, placeholder: 'Lidee de collab' },
+      { id: 'q_collab_avail', label: 'Disponibilites', style: TextInputStyle.Short, required: false, placeholder: 'Dispos' },
+    ],
+  },
+  'sawa-staff': {
+    label: '🧸 Staff',
+    emoji: '🧸',
+    description: 'Candidature staff pour aider le serveur au quotidien.',
+    pingRoles: ['1328310384007970888'],
+    adminRoles: ['1328310384007970888', '1118835561868824637', '1118834640296349696'],
+    requiresVerified: true,
+    questions: [
+      { id: 'q_staff_motive', label: 'Pourquoi toi', style: TextInputStyle.Paragraph, required: true, placeholder: 'Pourquoi toi ?' },
+      { id: 'q_staff_exp', label: 'Experience', style: TextInputStyle.Paragraph, required: false, placeholder: 'Experience' },
+      { id: 'q_staff_time', label: 'Disponibilite', style: TextInputStyle.Short, required: true, placeholder: 'Disponibilite' },
+      { id: 'q_staff_age', label: 'Majeur ou non', style: TextInputStyle.Short, required: false, placeholder: 'Majeur ou non' },
+    ],
+  },
+  'sawa-other': {
+    label: '🌙 Autre',
+    emoji: '🌙',
+    description: 'Autre demande si aucune categorie ne convient.',
+    pingRoles: ['1328310384007970888'],
+    adminRoles: SAWA_ADMIN_ROLE_IDS,
+    questions: [
+      { id: 'q_other_subject', label: 'Sujet', style: TextInputStyle.Short, required: true, placeholder: 'Resume rapide' },
+      { id: 'q_other_details', label: 'Details', style: TextInputStyle.Paragraph, required: true, placeholder: 'Explique ta demande' },
+    ],
+  },
+};
+
 /**
  * Load JSON data from disk.  If the file cannot be read or parsed, the
  * provided default value is returned instead.  This helper centralises the
@@ -169,8 +264,25 @@ let state = loadJson(configPaths.state, {});
 function defaultGuildConfig() {
   return {
     modules: {
-      youtube: { enabled: false, channels: [], cooldown: 5 * 60 * 1000, firstInstall: 'skip' },
+      youtube: { enabled: false, channels: [], cooldown: 5 * 60 * 1000, firstInstall: 'notify' },
+      shorts: { enabled: false, channels: [], cooldown: 5 * 60 * 1000, firstInstall: 'notify' },
       twitch: { enabled: false, streamers: {}, cooldown: 5 * 60 * 1000, consecutiveChecks: 1 },
+      autopublish: { enabled: false },
+      tickets: {
+        enabled: false,
+        panelChannelId: null,
+        panelMessageId: null,
+        openCategoryId: null,
+        closedCategoryId: null,
+        transcriptsChannelId: null,
+        logsChannelId: null,
+        creatorRoleId: null,
+        verifiedRoleId: null,
+        openCooldownMs: 60_000,
+        maxOpenPerUser: 2,
+        dmOnOpen: true,
+        dmTranscript: true,
+      },
       backups: { enabled: false, channelId: null, schedule: null, retention: 10 },
       templates: { enabled: false, items: {} },
       welcome: { enabled: false, channelId: null, message: 'Bienvenue sur {server}, {user} !' },
@@ -183,7 +295,10 @@ function defaultGuildConfig() {
     roleLevels: {},
     featureToggles: {
       youtube: true,
+      shorts: true,
       twitch: true,
+      autopublish: true,
+      tickets: true,
       backups: true,
       templates: true,
       welcome: true,
@@ -197,6 +312,21 @@ function defaultGuildConfig() {
     },
     antiSpam: {}, // per‑channel last send timestamps
   };
+}
+
+function applyGuildPreset(guildId, guildCfg) {
+  if (guildId !== SAWA_GUILD_ID) return guildCfg;
+  guildCfg.modules.tickets = {
+    ...guildCfg.modules.tickets,
+    ...SAWA_TICKET_DEFAULTS,
+    panelMessageId: guildCfg.modules.tickets.panelMessageId || null,
+    creatorRoleId: guildCfg.modules.tickets.creatorRoleId || null,
+    verifiedRoleId: guildCfg.modules.tickets.verifiedRoleId || null,
+  };
+  guildCfg.modules.logs.enabled = true;
+  guildCfg.modules.logs.channelId = guildCfg.modules.logs.channelId || SAWA_LOGS_CHANNEL_ID;
+  guildCfg.featureToggles.tickets = true;
+  return guildCfg;
 }
 
 function migrateGuildConfig(guildCfg) {
@@ -219,6 +349,14 @@ function migrateGuildConfig(guildCfg) {
     if (guildCfg.featureToggles[k] === undefined) guildCfg.featureToggles[k] = v;
   }
 
+  // Migrate firstInstall from 'skip' to 'notify' for youtube/shorts
+  if (guildCfg.modules.youtube && guildCfg.modules.youtube.firstInstall === 'skip') {
+    guildCfg.modules.youtube.firstInstall = 'notify';
+  }
+  if (guildCfg.modules.shorts && guildCfg.modules.shorts.firstInstall === 'skip') {
+    guildCfg.modules.shorts.firstInstall = 'notify';
+  }
+
   return guildCfg;
 }
 
@@ -236,9 +374,12 @@ function ensureGuildConfig(guildId) {
   } else {
     config[guildId] = migrateGuildConfig(config[guildId]);
   }
+  config[guildId] = applyGuildPreset(guildId, config[guildId]);
   if (!state[guildId]) {
-    state[guildId] = { youtube: {}, twitch: {} };
+    state[guildId] = { youtube: {}, twitch: {}, shorts: {}, tickets: {} };
   }
+  if (!state[guildId].shorts) state[guildId].shorts = {};
+  if (!state[guildId].tickets) state[guildId].tickets = {};
   return config[guildId];
 }
 
@@ -629,57 +770,187 @@ async function getTwitchAccessToken(clientId, clientSecret) {
 }
 
 /**
- * Poll all guilds for new YouTube videos.  For each guild that has the
- * YouTube module enabled, iterate through its list of watched channels and
- * check for the most recent video using the search.list endpoint of the
- * YouTube Data API.  The `order` parameter set to `date` sorts resources
- * in reverse chronological order【755683164106593†L330-L339】 and the `channelId` parameter
- * restricts results to the specified channel【755683164106593†L257-L263】.  When a new video is
- * found an embed is posted and the lastVideoId is updated.
+ * Resolve a YouTube channel identifier (UC… ID, @handle, or custom URL slug)
+ * to a verified { id, title } object.  Returns null when the identifier does
+ * not match any channel.
+ */
+async function resolveYouTubeChannel(input) {
+  const apiKey = process.env.YT_API_KEY;
+  if (!apiKey) return null;
+
+  // Try direct channel ID lookup first (UC…)
+  if (input.startsWith('UC')) {
+    const res = await fetch(
+      `https://www.googleapis.com/youtube/v3/channels?part=snippet&id=${encodeURIComponent(input)}&key=${apiKey}`,
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.items && data.items.length > 0) {
+        return { id: data.items[0].id, title: data.items[0].snippet.title };
+      }
+    }
+  }
+
+  // Try resolving as @handle or custom slug
+  const handle = input.startsWith('@') ? input : `@${input}`;
+  const res = await fetch(
+    `https://www.googleapis.com/youtube/v3/channels?part=snippet&forHandle=${encodeURIComponent(handle)}&key=${apiKey}`,
+  );
+  if (res.ok) {
+    const data = await res.json();
+    if (data.items && data.items.length > 0) {
+      return { id: data.items[0].id, title: data.items[0].snippet.title };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Convert a YouTube channel ID (UCxxx) to its uploads playlist ID (UUxxx).
+ */
+function getUploadsPlaylistId(channelId) {
+  if (channelId.startsWith('UC')) return 'UU' + channelId.slice(2);
+  return channelId;
+}
+
+/**
+ * Parse an ISO 8601 duration string (e.g. PT1H2M30S, PT58S, PT1M) into
+ * total seconds.
+ */
+function parseISO8601Duration(str) {
+  const m = (str || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+  if (!m) return 0;
+  return (parseInt(m[1] || '0', 10) * 3600) +
+         (parseInt(m[2] || '0', 10) * 60) +
+         (parseInt(m[3] || '0', 10));
+}
+
+/**
+ * Poll all guilds for new YouTube videos and Shorts.  Uses the playlistItems
+ * endpoint (1 quota unit) instead of search (100 units) for efficiency.
+ * After finding new videos, calls the videos endpoint to check duration and
+ * classify content as a Short (≤60s) or a regular video.
  */
 async function pollYouTube() {
+  const apiKey = process.env.YT_API_KEY;
+  if (!apiKey) return;
+
   for (const [guildId, guildCfg] of Object.entries(config)) {
-    const moduleCfg = guildCfg.modules.youtube;
-    if (!guildCfg.featureToggles.youtube || !moduleCfg.enabled) continue;
-    const apiKey = process.env.YT_API_KEY;
-    if (!apiKey) continue;
-    for (const channelCfg of moduleCfg.channels) {
-      const { id: ytChannelId, announceChannelId } = channelCfg;
+    const ytCfg = guildCfg.modules.youtube;
+    const shCfg = guildCfg.modules.shorts;
+    const ytEnabled = guildCfg.featureToggles.youtube && ytCfg.enabled;
+    const shEnabled = guildCfg.featureToggles.shorts && shCfg.enabled;
+    if (!ytEnabled && !shEnabled) continue;
+
+    // Collect all unique YT channel IDs that need polling, with their targets
+    const channelTargets = new Map(); // ytChannelId → { youtube: [announceIds], shorts: [announceIds] }
+    if (ytEnabled) {
+      for (const c of ytCfg.channels) {
+        if (!channelTargets.has(c.id)) channelTargets.set(c.id, { youtube: [], shorts: [] });
+        channelTargets.get(c.id).youtube.push(c.announceChannelId);
+      }
+    }
+    if (shEnabled) {
+      for (const c of shCfg.channels) {
+        if (!channelTargets.has(c.id)) channelTargets.set(c.id, { youtube: [], shorts: [] });
+        channelTargets.get(c.id).shorts.push(c.announceChannelId);
+      }
+    }
+
+    // Ensure state exists for this guild before polling
+    if (!state[guildId]) state[guildId] = { youtube: {}, twitch: {}, shorts: {} };
+    if (!state[guildId].youtube) state[guildId].youtube = {};
+    if (!state[guildId].shorts) state[guildId].shorts = {};
+
+    for (const [ytChannelId, targets] of channelTargets) {
       try {
+        // Use playlistItems (1 quota unit) instead of search (100 units)
+        const playlistId = getUploadsPlaylistId(ytChannelId);
         const res = await fetch(
-          `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(ytChannelId)}&maxResults=1&order=date&type=video&key=${apiKey}`,
+          `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${encodeURIComponent(playlistId)}&maxResults=3&key=${apiKey}`,
         );
         if (!res.ok) {
-          log(guildId, `Erreur API YouTube: ${res.status}`);
+          log(guildId, `Erreur API YouTube playlistItems: ${res.status}`);
           continue;
         }
         const data = await res.json();
-        if (data.items && data.items.length > 0) {
-          const item = data.items[0];
-          const videoId = item.id.videoId;
-          const last = state[guildId].youtube[ytChannelId];
-          // Determine whether to notify
-          const isFirstInstall = last === undefined;
-          if (isFirstInstall) {
-            // On first install, decide whether to skip or notify
-            state[guildId].youtube[ytChannelId] = videoId;
-            if (moduleCfg.firstInstall === 'notify') {
-              await sendYouTubeNotification(guildId, announceChannelId, item);
+        if (!data.items || data.items.length === 0) continue;
+
+        // Check the most recent video
+        const item = data.items[0];
+        const videoId = item.snippet.resourceId.videoId;
+
+        // Check if this video is new for either youtube or shorts state
+        const lastYt = state[guildId].youtube[ytChannelId];
+        const lastSh = state[guildId].shorts[ytChannelId];
+        const isNewForYt = lastYt !== videoId;
+        const isNewForSh = lastSh !== videoId;
+
+        if (!isNewForYt && !isNewForSh) continue;
+
+        // Fetch video details to get duration (1 quota unit)
+        const vidRes = await fetch(
+          `https://www.googleapis.com/youtube/v3/videos?part=contentDetails,snippet&id=${videoId}&key=${apiKey}`,
+        );
+        if (!vidRes.ok) {
+          log(guildId, `Erreur API YouTube videos: ${vidRes.status}`);
+          continue;
+        }
+        const vidData = await vidRes.json();
+        if (!vidData.items || vidData.items.length === 0) continue;
+
+        const videoInfo = vidData.items[0];
+        const durationSec = parseISO8601Duration(videoInfo.contentDetails.duration);
+        const isShort = durationSec <= 60;
+
+        // Build a compatible item object for notification functions
+        const notifItem = {
+          snippet: videoInfo.snippet,
+          id: { videoId },
+        };
+
+        const now = Date.now();
+
+        if (isShort && isNewForSh && targets.shorts.length > 0) {
+          // Handle first install for shorts
+          const isFirstInstall = lastSh === undefined;
+          state[guildId].shorts[ytChannelId] = videoId;
+          if (isFirstInstall && shCfg.firstInstall !== 'notify') {
+            persist();
+          } else {
+            for (const announceId of targets.shorts) {
+              const spamKey = `${guildId}:sh:${announceId}`;
+              if (guildCfg.antiSpam[spamKey] && now - guildCfg.antiSpam[spamKey] < shCfg.cooldown) continue;
+              guildCfg.antiSpam[spamKey] = now;
+              await sendShortsNotification(guildId, announceId, notifItem);
             }
             persist();
-            continue;
           }
-          if (last === videoId) continue;
-          // anti‑spam: check cooldown per announce channel
-          const now = Date.now();
-          const spamKey = `${guildId}:${announceChannelId}`;
-          if (guildCfg.antiSpam[spamKey] && now - guildCfg.antiSpam[spamKey] < moduleCfg.cooldown) {
-            continue;
-          }
+        } else if (!isShort && isNewForYt && targets.youtube.length > 0) {
+          // Handle first install for youtube
+          const isFirstInstall = lastYt === undefined;
           state[guildId].youtube[ytChannelId] = videoId;
-          guildCfg.antiSpam[spamKey] = now;
+          if (isFirstInstall && ytCfg.firstInstall !== 'notify') {
+            persist();
+          } else {
+            for (const announceId of targets.youtube) {
+              const spamKey = `${guildId}:yt:${announceId}`;
+              if (guildCfg.antiSpam[spamKey] && now - guildCfg.antiSpam[spamKey] < ytCfg.cooldown) continue;
+              guildCfg.antiSpam[spamKey] = now;
+              await sendYouTubeNotification(guildId, announceId, notifItem);
+            }
+            persist();
+          }
+        }
+
+        // Update state for the type we don't target so we don't re-check
+        if (isShort && isNewForYt) {
+          state[guildId].youtube[ytChannelId] = videoId;
           persist();
-          await sendYouTubeNotification(guildId, announceChannelId, item);
+        } else if (!isShort && isNewForSh) {
+          state[guildId].shorts[ytChannelId] = videoId;
+          persist();
         }
       } catch (err) {
         log(guildId, `Échec de la récupération des vidéos YouTube: ${err.message}`);
@@ -708,15 +979,42 @@ async function sendYouTubeNotification(guildId, discordChannelId, item) {
     const videoId = item.id.videoId;
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
-      .setTitle(snippet.title)
+      .setTitle(`▶️ Nouvelle vidéo : ${snippet.title}`)
       .setURL(`https://www.youtube.com/watch?v=${videoId}`)
-      .setDescription(snippet.description || '')
-      .setThumbnail(snippet.thumbnails?.high?.url ?? null)
-      .addFields({ name: 'Chaîne', value: snippet.channelTitle })
+      .setDescription(snippet.description ? snippet.description.slice(0, 200) : '')
+      .setImage(snippet.thumbnails?.maxres?.url ?? snippet.thumbnails?.high?.url ?? null)
+      .addFields({ name: 'Chaîne', value: snippet.channelTitle, inline: true })
       .setTimestamp(new Date(snippet.publishedAt));
     await channel.send({ embeds: [embed] });
   } catch (err) {
     log(guildId, `Erreur lors de l'envoi de la notification YouTube: ${err.message}`);
+  }
+}
+
+/**
+ * Send an embed notification for a YouTube Short to a specific guild/channel.
+ */
+async function sendShortsNotification(guildId, discordChannelId, item) {
+  if (!discordChannelId) return;
+  try {
+    const channel = await client.channels.fetch(discordChannelId);
+    const guild = client.guilds.cache.get(guildId);
+    if (!channel || !guild || !canSendEmbeds(channel, guild)) {
+      await log(guildId, "Impossible d'envoyer la notification Short (salon invalide ou permissions manquantes).");
+      return;
+    }
+    const snippet = item.snippet;
+    const videoId = item.id.videoId;
+    const embed = new EmbedBuilder()
+      .setColor(0xff0000)
+      .setTitle(`📱 Nouveau Short : ${snippet.title}`)
+      .setURL(`https://www.youtube.com/shorts/${videoId}`)
+      .setThumbnail(snippet.thumbnails?.high?.url ?? null)
+      .addFields({ name: 'Chaîne', value: snippet.channelTitle, inline: true })
+      .setTimestamp(new Date(snippet.publishedAt));
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    log(guildId, `Erreur lors de l'envoi de la notification Short: ${err.message}`);
   }
 }
 
@@ -766,7 +1064,16 @@ async function pollTwitch() {
             streamerState.isLive = true;
             streamerState.onlineChecks = 0;
             persist();
-            await sendTwitchNotification(guildId, announceId, stream);
+            // Fetch user profile for avatar
+            let userInfo = null;
+            try {
+              const userRes = await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(login)}`, {
+                headers: { 'Client-ID': clientId, Authorization: `Bearer ${token}` },
+              });
+              const userData = await userRes.json();
+              if (userData.data && userData.data.length > 0) userInfo = userData.data[0];
+            } catch (_) { /* avatar is optional */ }
+            await sendTwitchNotification(guildId, announceId, stream, userInfo);
           }
         } else {
           // offline
@@ -784,16 +1091,15 @@ async function pollTwitch() {
 }
 
 /**
- * Send a Twitch live notification embed.  The embed contains basic stream
- * metadata: title, game, viewer count, thumbnail and timestamp.  The
- * thumbnail URL returned by the Helix API contains placeholders for width
- * and height which are replaced with 1280 and 720 respectively.
+ * Send a Twitch live notification embed with streamer avatar and stream
+ * preview image.
  *
  * @param {string} guildId
  * @param {string|null} channelId
  * @param {object} stream The stream object returned by the API
+ * @param {object|null} userInfo The user object from the users endpoint (optional)
  */
-async function sendTwitchNotification(guildId, channelId, stream) {
+async function sendTwitchNotification(guildId, channelId, stream, userInfo) {
   if (!channelId) return;
   try {
     const channel = await client.channels.fetch(channelId);
@@ -802,21 +1108,39 @@ async function sendTwitchNotification(guildId, channelId, stream) {
       await log(guildId, "Impossible d'envoyer la notification Twitch (salon invalide ou permissions manquantes).");
       return;
     }
+    const streamUrl = `https://twitch.tv/${stream.user_login}`;
     const thumbnail = stream.thumbnail_url
       ? stream.thumbnail_url.replace('{width}', '1280').replace('{height}', '720')
       : null;
+    const fields = [
+      { name: 'Jeu/Catégorie', value: stream.game_name || 'Inconnu', inline: true },
+      { name: 'Spectateurs', value: `${stream.viewer_count}`, inline: true },
+    ];
+    if (stream.tags && stream.tags.length > 0) {
+      fields.push({ name: 'Tags', value: stream.tags.slice(0, 5).join(', '), inline: false });
+    }
     const embed = new EmbedBuilder()
       .setColor(0x9146ff)
+      .setAuthor({
+        name: stream.user_name,
+        iconURL: userInfo?.profile_image_url ?? undefined,
+        url: streamUrl,
+      })
       .setTitle(`🔴 Live maintenant : ${stream.title || 'Sans titre'}`)
-      .setURL(`https://twitch.tv/${stream.user_login}`)
-      .setDescription(`Stream par **${stream.user_name}**`)
-      .addFields(
-        { name: 'Jeu/Catégorie', value: stream.game_name || 'Inconnu', inline: true },
-        { name: 'Spectateurs', value: `${stream.viewer_count}`, inline: true },
-      )
-      .setThumbnail(thumbnail)
+      .setURL(streamUrl)
+      .addFields(...fields)
+      .setImage(thumbnail)
       .setTimestamp(new Date(stream.started_at));
-    await channel.send({ embeds: [embed] });
+    if (userInfo?.profile_image_url) {
+      embed.setThumbnail(userInfo.profile_image_url);
+    }
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('Regarder le stream')
+        .setStyle(ButtonStyle.Link)
+        .setURL(streamUrl),
+    );
+    await channel.send({ embeds: [embed], components: [row] });
   } catch (err) {
     log(guildId, `Erreur lors de l'envoi de la notification Twitch: ${err.message}`);
   }
@@ -994,6 +1318,9 @@ const interactive = {
   polls: new Map(),
   suggestions: new Map(),
 };
+const autoPublishWindow = new Map();
+const AUTOPUBLISH_MAX_PER_HOUR = 10;
+const AUTOPUBLISH_WINDOW_MS = 60 * 60 * 1000;
 
 function shortId(len = 8) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
@@ -1027,6 +1354,57 @@ function canSendEmbeds(channel, guild) {
   );
 }
 
+function isAnnouncementChannel(channel) {
+  return Boolean(channel && channel.type === ChannelType.GuildAnnouncement);
+}
+
+function canAutoPublish(channel, guild) {
+  if (!channel || typeof channel.permissionsFor !== 'function') return false;
+  const perms = channel.permissionsFor(guild.members.me);
+  return Boolean(
+    perms
+      && perms.has(PermissionsBitField.Flags.ViewChannel)
+      && perms.has(PermissionsBitField.Flags.SendMessages)
+      && perms.has(PermissionsBitField.Flags.ManageMessages),
+  );
+}
+
+function reserveAutoPublishSlot(guildId) {
+  const now = Date.now();
+  const timestamps = (autoPublishWindow.get(guildId) || []).filter(ts => now - ts < AUTOPUBLISH_WINDOW_MS);
+  if (timestamps.length >= AUTOPUBLISH_MAX_PER_HOUR) {
+    autoPublishWindow.set(guildId, timestamps);
+    return false;
+  }
+  timestamps.push(now);
+  autoPublishWindow.set(guildId, timestamps);
+  return true;
+}
+
+async function maybeAutoPublishMessage(message) {
+  if (!message?.guild || !message.channel) return;
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const autoCfg = guildCfg.modules.autopublish;
+  if (!moduleEnabled(guildCfg, 'autopublish') || !autoCfg?.enabled) return;
+  if (!isAnnouncementChannel(message.channel)) return;
+  if (!message.crosspostable) return;
+  if (!canAutoPublish(message.channel, message.guild)) return;
+  if (!reserveAutoPublishSlot(message.guild.id)) {
+    return log(message.guild.id, `[autopublish] Limite horaire atteinte pour ${message.channel.id}`);
+  }
+
+  try {
+    await message.crosspost();
+  } catch (err) {
+    const code = err?.code;
+    if (code === 40033 || code === 40094) return;
+    if (code === 50013) {
+      return log(message.guild.id, `[autopublish] Permissions insuffisantes dans ${message.channel.id}`);
+    }
+    return log(message.guild.id, `[autopublish] Échec de publication dans ${message.channel.id}: ${err.message}`);
+  }
+}
+
 function makeBotEmbed(kind, guild, title, description, fields) {
   return buildEmbed(kind, { client, guild, title, description, fields });
 }
@@ -1037,6 +1415,448 @@ async function replyBot(message, kind, title, description, fields) {
 
 function moduleEnabled(guildCfg, name) {
   return Boolean(guildCfg?.featureToggles?.[name]);
+}
+
+function getTicketModule(guildId) {
+  return ensureGuildConfig(guildId).modules.tickets;
+}
+
+function getTicketState(guildId) {
+  ensureGuildConfig(guildId);
+  if (!state[guildId].tickets) state[guildId].tickets = {};
+  return state[guildId].tickets;
+}
+
+function getTicketType(typeId) {
+  return SAWA_TICKET_TYPES[typeId] || null;
+}
+
+function slugifyTicketName(input) {
+  return String(input || 'user')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 20) || 'user';
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatTicketRoleMentions(roleIds) {
+  return (roleIds || []).map(id => `<@&${id}>`).join(' ');
+}
+
+function ticketLogChannel(guild, ticketsCfg) {
+  return guild.channels.cache.get(ticketsCfg.logsChannelId || ticketsCfg.transcriptsChannelId || '');
+}
+
+function buildTicketPanelEmbed(guild) {
+  const lines = [
+    '🌙 Choisis la categorie qui correspond le mieux a ta demande.',
+    '',
+    '🐾 Support: aide, bug, souci ou question',
+    '🚨 Signalement: comportement, message ou situation a signaler',
+    '🤝 Collab: proposition de collab ou partenariat',
+    '🧸 Staff: candidature pour aider le serveur',
+    '🌙 Autre: si rien ne correspond vraiment',
+    '',
+    '✨ Appuie sur le bouton qui te correspond.',
+    'Une fois ouvert, le ticket reste prive entre toi et le staff concerne.',
+  ];
+  return new EmbedBuilder()
+    .setColor(0x40449b)
+    .setTitle('⌜★⌟────✦・🎫 TICKETS・✦────⌞★⌟')
+    .setDescription(lines.join('\n'))
+    .setFooter({ text: `✦・${guild.name}・✦` });
+}
+
+function buildTicketPanelComponents() {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticketopen:sawa-support').setLabel('Support').setEmoji('🐾').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ticketopen:sawa-report').setLabel('Signalement').setEmoji('🚨').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('ticketopen:sawa-collab').setLabel('Collab').setEmoji('🤝').setStyle(ButtonStyle.Success),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticketopen:sawa-staff').setLabel('Staff').setEmoji('🧸').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ticketopen:sawa-other').setLabel('Autre').setEmoji('🌙').setStyle(ButtonStyle.Primary),
+  );
+  return [row1, row2];
+}
+
+function buildTicketActionRows(isClosed = false) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket:close').setLabel('Fermer').setEmoji('🧯').setStyle(ButtonStyle.Danger).setDisabled(isClosed),
+    new ButtonBuilder().setCustomId('ticket:claim').setLabel('Prendre').setEmoji('🧸').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ticket:reopen').setLabel('Rouvrir').setEmoji('✨').setStyle(ButtonStyle.Success).setDisabled(!isClosed),
+  );
+  return [row];
+}
+
+function buildTicketWelcomeEmbed(guild, ticketType, opener, answers) {
+  const fields = answers.map(answer => ({
+    name: answer.label,
+    value: clampStr(answer.value || 'Non renseigne', 1024),
+    inline: false,
+  }));
+  return new EmbedBuilder()
+    .setColor(0x0455b8)
+    .setTitle('⌜★⌟────✦・Ticket ouvert・✦────⌞★⌟')
+    .setDescription(
+      `🌙 Bonjour <@${opener.id}>, ton ticket **${ticketType.label}** est bien ouvert.\n`
+      + '🐾 Merci de rester clair, patient et respectueux.\n'
+      + '📎 Si tu dois envoyer une capture ou une image, poste-la directement dans ce salon juste apres ce message.\n'
+      + '🧯 Utilise le bouton **Fermer** quand tout est regle.',
+    )
+    .addFields(fields)
+    .setFooter({ text: `✦・${guild.name}・✦` })
+    .setTimestamp();
+}
+
+function buildTicketDmEmbed(guild) {
+  return new EmbedBuilder()
+    .setColor(0x40449b)
+    .setTitle('🌙 Ton ticket est ouvert')
+    .setDescription('On arrive bientot, merci de patienter 🐾')
+    .setFooter({ text: `✦・${guild.name}・✦` });
+}
+
+function buildTicketClosedEmbed(guild, member) {
+  return new EmbedBuilder()
+    .setColor(0x40449b)
+    .setTitle('⌜★⌟────✦・Ticket ferme・✦────⌞★⌟')
+    .setDescription(`🧯 Ticket ferme par <@${member.id}>.\n🌙 Le transcript a ete prepare pour le staff.`)
+    .setFooter({ text: `✦・${guild.name}・✦` })
+    .setTimestamp();
+}
+
+function buildTicketClaimEmbed(guild, member) {
+  return new EmbedBuilder()
+    .setColor(0x0455b8)
+    .setTitle('⌜★⌟────✦・Ticket pris en charge・✦────⌞★⌟')
+    .setDescription(`🧸 <@${member.id}> prend ce ticket en charge.`)
+    .setFooter({ text: `✦・${guild.name}・✦` })
+    .setTimestamp();
+}
+
+function buildTicketReopenEmbed(guild, member) {
+  return new EmbedBuilder()
+    .setColor(0x0455b8)
+    .setTitle('⌜★⌟────✦・Ticket rouvert・✦────⌞★⌟')
+    .setDescription(`✨ Ticket rouvert par <@${member.id}>.`)
+    .setFooter({ text: `✦・${guild.name}・✦` })
+    .setTimestamp();
+}
+
+function canManageTicket(member, ticketInfo) {
+  if (!member || !ticketInfo) return false;
+  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  if (member.id === ticketInfo.ownerId) return true;
+  return (ticketInfo.adminRoles || []).some(roleId => member.roles.cache.has(roleId));
+}
+
+function canModerateTicket(member, ticketInfo) {
+  if (!member || !ticketInfo) return false;
+  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  return (ticketInfo.adminRoles || []).some(roleId => member.roles.cache.has(roleId));
+}
+
+function canCreateTicket(member, ticketType, ticketsCfg) {
+  if (!ticketType.requiresVerified) return { ok: true };
+  if (!ticketsCfg.verifiedRoleId) return { ok: true };
+  return member.roles.cache.has(ticketsCfg.verifiedRoleId)
+    ? { ok: true }
+    : { ok: false, reason: 'Ce ticket est reserve aux membres verifies.' };
+}
+
+function getOpenTicketsForUser(guildId, userId) {
+  return Object.values(getTicketState(guildId)).filter(t => t.ownerId === userId && !t.closedAt);
+}
+
+async function sendTicketLog(guild, ticketsCfg, title, description) {
+  const channel = ticketLogChannel(guild, ticketsCfg);
+  if (!channel || !channel.isTextBased()) return;
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x40449b)
+        .setTitle(title)
+        .setDescription(description)
+        .setTimestamp(),
+    ],
+  }).catch(() => {});
+}
+
+async function sendTicketSupportAlert(guild, channel, opener, ticketType) {
+  const logChannel = guild.channels.cache.get(SAWA_SUPPORT_ALERT_CHANNEL_ID);
+  if (!logChannel || !logChannel.isTextBased()) return;
+  await logChannel.send({
+    content: '<@&1328310491038351471>',
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x40449b)
+        .setTitle('⌜★⌟────✦・Nouveau ticket・✦────⌞★⌟')
+        .setDescription(
+          `🎫 Un nouveau ticket **${ticketType.label}** vient d'etre cree.\n`
+          + `🌙 Membre: <@${opener.id}>\n`
+          + `🐾 Salon: ${channel}\n`
+          + '✨ Merci de passer des que possible.',
+        )
+        .setFooter({ text: `✦・${guild.name}・✦` })
+        .setTimestamp(),
+    ],
+    allowedMentions: { roles: ['1328310491038351471'] },
+  }).catch(() => {});
+}
+
+async function fetchTicketMessages(channel) {
+  let before;
+  const out = [];
+  while (true) {
+    const batch = await channel.messages.fetch({ limit: 100, before }).catch(() => null);
+    if (!batch || batch.size === 0) break;
+    out.push(...batch.values());
+    before = batch.last().id;
+    if (batch.size < 100) break;
+  }
+  return out.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+function buildTranscriptHtml(guild, channel, ticketInfo, messages) {
+  const rows = messages.map((message) => {
+    const body = [
+      message.content ? `<div class="content">${escapeHtml(message.content).replace(/\n/g, '<br>')}</div>` : '',
+      message.attachments.size
+        ? `<div class="attachments">${[...message.attachments.values()].map(a => `<a href="${escapeHtml(a.url)}">${escapeHtml(a.name || 'attachment')}</a>`).join('<br>')}</div>`
+        : '',
+    ].filter(Boolean).join('');
+    return `<article class="msg">
+<div class="meta"><strong>${escapeHtml(message.author.tag)}</strong> <span>${new Date(message.createdTimestamp).toLocaleString('fr-FR')}</span></div>
+${body}
+</article>`;
+  }).join('\n');
+  return `<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(channel.name)}</title>
+<style>
+body{background:#0d122b;color:#f4f6ff;font-family:Arial,sans-serif;padding:24px}
+.card{max-width:980px;margin:0 auto;background:#151c45;border:1px solid #40449B;border-radius:16px;padding:24px}
+h1{margin:0 0 8px;color:#9fb6ff}
+.meta-top{color:#cad4ff;margin-bottom:24px}
+.msg{padding:14px 0;border-top:1px solid rgba(255,255,255,.08)}
+.meta{font-size:13px;color:#aab7ff;margin-bottom:6px}
+.content{white-space:normal;line-height:1.5}
+.attachments a{color:#8dc7ff}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>⌜★⌟────✦・Transcript Ticket・✦────⌞★⌟</h1>
+<div class="meta-top">Serveur: ${escapeHtml(guild.name)}<br>Salon: ${escapeHtml(channel.name)}<br>Type: ${escapeHtml(ticketInfo.typeId)}<br>Createur: ${escapeHtml(ticketInfo.ownerTag || ticketInfo.ownerId)}</div>
+${rows || '<p>Aucun message.</p>'}
+</div>
+</body>
+</html>`;
+}
+
+async function deliverTicketTranscript(guild, channel, ticketInfo, closedBy) {
+  const ticketsCfg = getTicketModule(guild.id);
+  const transcriptChannel = guild.channels.cache.get(ticketsCfg.transcriptsChannelId || '');
+  const messages = await fetchTicketMessages(channel);
+  const html = buildTranscriptHtml(guild, channel, ticketInfo, messages);
+  const file = new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: `${channel.name}-transcript.html` });
+
+  if (transcriptChannel && transcriptChannel.isTextBased()) {
+    await transcriptChannel.send({
+      content: `🎫 Transcript pour <#${channel.id}> • createur <@${ticketInfo.ownerId}> • ferme par <@${closedBy.id}>`,
+      files: [file],
+    }).catch(() => {});
+  }
+
+  if (ticketsCfg.dmTranscript) {
+    const user = await client.users.fetch(ticketInfo.ownerId).catch(() => null);
+    if (user) {
+      const dmFile = new AttachmentBuilder(Buffer.from(html, 'utf8'), { name: `${channel.name}-transcript.html` });
+      await user.send({
+        content: '🌙 Voici le transcript HTML de ton ticket.',
+        files: [dmFile],
+      }).catch(() => {});
+    }
+  }
+}
+
+async function createTicketChannel(guild, opener, typeId, answers) {
+  const guildCfg = ensureGuildConfig(guild.id);
+  const ticketsCfg = guildCfg.modules.tickets;
+  const type = getTicketType(typeId);
+  if (!type) throw new Error('Type de ticket inconnu');
+
+  const userOpenTickets = getOpenTicketsForUser(guild.id, opener.id);
+  if (userOpenTickets.length >= ticketsCfg.maxOpenPerUser) {
+    throw new Error(`Tu as deja ${ticketsCfg.maxOpenPerUser} ticket(s) ouvert(s).`);
+  }
+
+  const stateTickets = getTicketState(guild.id);
+  const lastOpenedAt = Math.max(0, ...Object.values(stateTickets).filter(t => t.ownerId === opener.id).map(t => t.createdAt || 0));
+  if (Date.now() - lastOpenedAt < ticketsCfg.openCooldownMs) {
+    throw new Error('Merci de patienter un peu avant douvrir un nouveau ticket.');
+  }
+
+  const typeSlug = typeId.replace(/^sawa-/, '');
+  const baseName = slugifyTicketName(opener.username);
+  let name = `ticket-${typeSlug}-${baseName}`;
+  let index = 2;
+  while (guild.channels.cache.find(ch => ch.name === name)) {
+    name = `ticket-${typeSlug}-${baseName}-${index}`;
+    index++;
+  }
+
+  const overwrites = [
+    { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+    {
+      id: opener.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks,
+      ],
+    },
+  ];
+
+  for (const roleId of new Set(type.adminRoles)) {
+    overwrites.push({
+      id: roleId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks,
+        PermissionsBitField.Flags.ManageMessages,
+        PermissionsBitField.Flags.ManageChannels,
+      ],
+    });
+  }
+
+  const channel = await guild.channels.create({
+    name,
+    type: ChannelType.GuildText,
+    parent: ticketsCfg.openCategoryId || undefined,
+    topic: `ticket:${typeId}:owner=${opener.id}`,
+    permissionOverwrites: overwrites,
+  });
+
+  const ticketInfo = {
+    typeId,
+    ownerId: opener.id,
+    ownerTag: opener.user.tag,
+    adminRoles: [...new Set(type.adminRoles)],
+    pingRoles: [...new Set(type.pingRoles)],
+    answers,
+    createdAt: Date.now(),
+    createdByChannelId: channel.id,
+    claimedBy: null,
+    closedAt: null,
+  };
+  stateTickets[channel.id] = ticketInfo;
+  persist();
+
+  const mentionText = formatTicketRoleMentions(type.pingRoles);
+  await channel.send({
+    content: mentionText || undefined,
+    embeds: [buildTicketWelcomeEmbed(guild, type, opener.user, answers)],
+    components: buildTicketActionRows(false),
+    allowedMentions: { roles: type.pingRoles },
+  });
+
+  const needsAttachmentHint = answers.some(answer => /capture|preuve|image|lien/i.test(answer.label));
+  if (needsAttachmentHint) {
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x0455b8)
+          .setTitle('⌜★⌟────✦・Capture / Image・✦────⌞★⌟')
+          .setDescription('📎 Discord ne permet pas d’ajouter une image directement dans le formulaire.\nEnvoie simplement ta capture, image ou fichier ici dans le ticket, et le staff la verra.'),
+      ],
+    }).catch(() => {});
+  }
+
+  if (ticketsCfg.dmOnOpen) {
+    await opener.send({ embeds: [buildTicketDmEmbed(guild)] }).catch(() => {});
+  }
+
+  await sendTicketLog(guild, ticketsCfg, '⌜★⌟────✦・Nouveau ticket・✦────⌞★⌟', `🎫 ${type.label} ouvert par <@${opener.id}> dans <#${channel.id}>.`);
+  await sendTicketSupportAlert(guild, channel, opener.user, type);
+  return channel;
+}
+
+async function closeTicket(channel, member) {
+  const guild = channel.guild;
+  const tickets = getTicketState(guild.id);
+  const ticketInfo = tickets[channel.id];
+  if (!ticketInfo) throw new Error('Ce salon nest pas un ticket connu.');
+  if (!canManageTicket(member, ticketInfo)) throw new Error('Tu ne peux pas fermer ce ticket.');
+  if (ticketInfo.closedAt) throw new Error('Ce ticket est deja ferme.');
+
+  ticketInfo.closedAt = Date.now();
+  await deliverTicketTranscript(guild, channel, ticketInfo, member);
+
+  const ticketsCfg = getTicketModule(guild.id);
+  await channel.setParent(ticketsCfg.closedCategoryId || null).catch(() => {});
+  await channel.permissionOverwrites.edit(ticketInfo.ownerId, {
+    ViewChannel: true,
+    ReadMessageHistory: true,
+    SendMessages: false,
+  }).catch(() => {});
+  await channel.send({ embeds: [buildTicketClosedEmbed(guild, member.user)], components: buildTicketActionRows(true) }).catch(() => {});
+  persist();
+  await sendTicketLog(guild, ticketsCfg, '⌜★⌟────✦・Ticket ferme・✦────⌞★⌟', `🧯 <#${channel.id}> ferme par <@${member.id}>.`);
+}
+
+async function reopenTicket(channel, member) {
+  const guild = channel.guild;
+  const tickets = getTicketState(guild.id);
+  const ticketInfo = tickets[channel.id];
+  if (!ticketInfo) throw new Error('Ce salon nest pas un ticket connu.');
+  if (!canModerateTicket(member, ticketInfo)) throw new Error('Tu ne peux pas rouvrir ce ticket.');
+  if (!ticketInfo.closedAt) throw new Error('Ce ticket est deja ouvert.');
+
+  ticketInfo.closedAt = null;
+  const ticketsCfg = getTicketModule(guild.id);
+  await channel.setParent(ticketsCfg.openCategoryId || null).catch(() => {});
+  await channel.permissionOverwrites.edit(ticketInfo.ownerId, {
+    ViewChannel: true,
+    ReadMessageHistory: true,
+    SendMessages: true,
+    AttachFiles: true,
+    EmbedLinks: true,
+  }).catch(() => {});
+  await channel.send({ embeds: [buildTicketReopenEmbed(guild, member.user)], components: buildTicketActionRows(false) }).catch(() => {});
+  persist();
+  await sendTicketLog(guild, ticketsCfg, '⌜★⌟────✦・Ticket rouvert・✦────⌞★⌟', `✨ <#${channel.id}> rouvert par <@${member.id}>.`);
+}
+
+async function claimTicket(channel, member) {
+  const guild = channel.guild;
+  const tickets = getTicketState(guild.id);
+  const ticketInfo = tickets[channel.id];
+  if (!ticketInfo) throw new Error('Ce salon nest pas un ticket connu.');
+  if (!canModerateTicket(member, ticketInfo)) throw new Error('Tu ne peux pas prendre ce ticket.');
+  ticketInfo.claimedBy = member.id;
+  persist();
+  await channel.send({ embeds: [buildTicketClaimEmbed(guild, member.user)] }).catch(() => {});
+  await sendTicketLog(guild, getTicketModule(guild.id), '⌜★⌟────✦・Ticket pris・✦────⌞★⌟', `🧸 <#${channel.id}> pris par <@${member.id}>.`);
 }
 
 function resolveTargetUser(message, token) {
@@ -1289,19 +2109,26 @@ registerCommand('youtube', 1, async (message, args) => {
   const ytCfg = guildCfg.modules.youtube;
   if (sub === 'add') {
     if (args.length < 2) {
-      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !youtube add <channelId> #salon')] });
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !youtube add <channelId ou @handle> #salon')] });
     }
-    const channelId = args.shift();
+    const rawInput = args.shift();
     const channelMention = args.shift();
     const announceId = channelMention.replace(/<#(\d+)>/, '$1');
+    const resolved = await resolveYouTubeChannel(rawInput);
+    if (!resolved) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setDescription(`Chaîne YouTube introuvable pour **${rawInput}**. Vérifie l'ID (UCxxx) ou le handle (@nom).`)] });
+    }
+    const channelId = resolved.id;
     ytCfg.enabled = true;
     const exists = ytCfg.channels.some(c => c.id === channelId && c.announceChannelId === announceId);
     if (exists) {
       return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Cette chaîne YouTube est déjà configurée pour ce salon.')] });
     }
     ytCfg.channels.push({ id: channelId, announceChannelId: announceId });
+    // Reset state so the next poll treats this as a fresh install and sends a notification
+    delete state[message.guild.id].youtube[channelId];
     persist();
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Chaîne YouTube **${channelId}** ajoutée. Les notifications seront publiées dans <#${announceId}>.`)] });
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Chaîne YouTube **${resolved.title}** (\`${channelId}\`) ajoutée. Les notifications seront publiées dans <#${announceId}>.`)] });
   } else if (sub === 'remove') {
     if (args.length < 1) {
       return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !youtube remove <channelId>')] });
@@ -1317,6 +2144,59 @@ registerCommand('youtube', 1, async (message, args) => {
     }
     const lines = ytCfg.channels.map(c => `• ${c.id} → <#${c.announceChannelId}>`).join('\n');
     return message.reply({ embeds: [new EmbedBuilder().setColor(0x3498db).setTitle('Chaînes YouTube suivies').setDescription(lines)] });
+  } else {
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Sous‑commandes: add, remove, list')] });
+  }
+});
+
+/*
+ * Shorts commands
+ *
+ * Commands to manage YouTube Shorts notifications separately from regular
+ * videos.  Uses the same channel IDs but routes to a different announce
+ * channel and only notifies for videos ≤60 seconds.
+ */
+registerCommand('shorts', 1, async (message, args) => {
+  const sub = args.shift();
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const shCfg = guildCfg.modules.shorts;
+  if (sub === 'add') {
+    if (args.length < 2) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !shorts add <channelId ou @handle> #salon')] });
+    }
+    const rawInput = args.shift();
+    const channelMention = args.shift();
+    const announceId = channelMention.replace(/<#(\d+)>/, '$1');
+    const resolved = await resolveYouTubeChannel(rawInput);
+    if (!resolved) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setDescription(`Chaîne YouTube introuvable pour **${rawInput}**. Vérifie l'ID (UCxxx) ou le handle (@nom).`)] });
+    }
+    const channelId = resolved.id;
+    shCfg.enabled = true;
+    const exists = shCfg.channels.some(c => c.id === channelId && c.announceChannelId === announceId);
+    if (exists) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Cette chaîne est déjà configurée pour les Shorts dans ce salon.')] });
+    }
+    shCfg.channels.push({ id: channelId, announceChannelId: announceId });
+    // Reset state so the next poll treats this as a fresh install and sends a notification
+    delete state[message.guild.id].shorts[channelId];
+    persist();
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Shorts de **${resolved.title}** (\`${channelId}\`) ajoutés. Les notifications seront publiées dans <#${announceId}>.`)] });
+  } else if (sub === 'remove') {
+    if (args.length < 1) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !shorts remove <channelId>')] });
+    }
+    const channelId = args.shift();
+    shCfg.channels = shCfg.channels.filter(c => c.id !== channelId);
+    delete state[message.guild.id].shorts[channelId];
+    persist();
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription(`Shorts de **${channelId}** supprimés.`)] });
+  } else if (sub === 'list') {
+    if (!shCfg.channels || shCfg.channels.length === 0) {
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Aucune chaîne YouTube suivie pour les Shorts.')] });
+    }
+    const lines = shCfg.channels.map(c => `• ${c.id} → <#${c.announceChannelId}>`).join('\n');
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x3498db).setTitle('Chaînes YouTube suivies (Shorts)').setDescription(lines)] });
   } else {
     return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Sous‑commandes: add, remove, list')] });
   }
@@ -1427,7 +2307,7 @@ registerCommand('template', 1, async (message, args, rawArgs) => {
       return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Utilisation: !template save <nom> Titre | Contenu')] });
     }
     const name = args.shift().toLowerCase();
-    const text = String(rawArgs || '').replace(/^\s*set\s*/i, '');
+    const text = String(rawArgs || '').replace(/^\s*save\s+\S+\s*/i, '');
     const parts = text.split('|');
     const title = parts[0].trim();
     const content = parts[1] ? parts[1].trim() : '';
@@ -1587,6 +2467,114 @@ registerCommand('feature', 3, async (message, args) => {
   } else {
     return message.reply({ embeds: [new EmbedBuilder().setColor(0xffaa00).setDescription('Sous‑commandes: list, enable, disable')] });
   }
+});
+
+registerCommand('autopublish', 2, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  const autoCfg = guildCfg.modules.autopublish;
+  const sub = (args.shift() || 'status').toLowerCase();
+
+  if (sub === 'status') {
+    const active = moduleEnabled(guildCfg, 'autopublish') && autoCfg.enabled;
+    return replyBot(
+      message,
+      active ? 'success' : 'info',
+      'Auto Publish',
+      active
+        ? 'Activé pour tous les salons Announcement où le bot peut publier.'
+        : 'Désactivé. Active avec `!autopublish on`.',
+      [
+        { name: 'Feature toggle', value: guildCfg.featureToggles.autopublish ? 'ON' : 'OFF', inline: true },
+        { name: 'Module', value: autoCfg.enabled ? 'ON' : 'OFF', inline: true },
+        { name: 'Limite', value: `${AUTOPUBLISH_MAX_PER_HOUR} publications / heure / serveur`, inline: false },
+      ],
+    );
+  }
+
+  if (sub === 'on') {
+    guildCfg.featureToggles.autopublish = true;
+    autoCfg.enabled = true;
+    persist();
+    return replyBot(message, 'success', 'Auto Publish activé', 'Les nouveaux messages des salons Announcement seront publiés automatiquement.');
+  }
+
+  if (sub === 'off') {
+    autoCfg.enabled = false;
+    persist();
+    return replyBot(message, 'success', 'Auto Publish désactivé', 'Les salons Announcement ne seront plus publiés automatiquement.');
+  }
+
+  return replyBot(message, 'warn', 'Utilisation', '`!autopublish on`, `!autopublish off`, `!autopublish status`');
+});
+
+registerCommand('ticketpanel', 2, async (message) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'tickets') || !guildCfg.modules.tickets.enabled) {
+    return replyBot(message, 'warn', 'Module tickets desactive', 'Active-le avant de publier le panel.');
+  }
+  const ticketsCfg = guildCfg.modules.tickets;
+  const targetChannel = message.guild.channels.cache.get(ticketsCfg.panelChannelId) || message.channel;
+  if (!targetChannel || !targetChannel.isTextBased()) {
+    return replyBot(message, 'error', 'Salon invalide', 'Impossible de publier le panel tickets.');
+  }
+  const posted = await targetChannel.send({
+    embeds: [buildTicketPanelEmbed(message.guild)],
+    components: buildTicketPanelComponents(),
+  });
+  ticketsCfg.panelMessageId = posted.id;
+  persist();
+  return replyBot(message, 'success', 'Panel tickets publie', `Le panel a ete envoye dans <#${targetChannel.id}>.`);
+});
+
+registerCommand('ticket', 0, async (message, args) => {
+  const guildCfg = ensureGuildConfig(message.guild.id);
+  if (!moduleEnabled(guildCfg, 'tickets') || !guildCfg.modules.tickets.enabled) {
+    return replyBot(message, 'warn', 'Module tickets desactive', 'Active avec `!feature enable tickets`.');
+  }
+  const sub = (args.shift() || 'status').toLowerCase();
+  const tickets = getTicketState(message.guild.id);
+  const ticketInfo = tickets[message.channel.id];
+
+  if (sub === 'status') {
+    if (!ticketInfo) return replyBot(message, 'info', 'Tickets', 'Panel: utilise `!ticketpanel` pour republier le panneau.');
+    return replyBot(message, 'info', 'Ticket', undefined, [
+      { name: 'Type', value: ticketInfo.typeId, inline: true },
+      { name: 'Createur', value: `<@${ticketInfo.ownerId}>`, inline: true },
+      { name: 'Etat', value: ticketInfo.closedAt ? 'ferme' : 'ouvert', inline: true },
+      { name: 'Pris par', value: ticketInfo.claimedBy ? `<@${ticketInfo.claimedBy}>` : 'personne', inline: true },
+    ]);
+  }
+
+  if (!ticketInfo) return replyBot(message, 'warn', 'Hors ticket', 'Cette commande doit etre utilisee dans un salon ticket.');
+
+  if (sub === 'close') {
+    try {
+      await closeTicket(message.channel, message.member);
+      return;
+    } catch (err) {
+      return replyBot(message, 'error', 'Impossible de fermer', err.message);
+    }
+  }
+
+  if (sub === 'reopen') {
+    try {
+      await reopenTicket(message.channel, message.member);
+      return;
+    } catch (err) {
+      return replyBot(message, 'error', 'Impossible de rouvrir', err.message);
+    }
+  }
+
+  if (sub === 'claim') {
+    try {
+      await claimTicket(message.channel, message.member);
+      return;
+    } catch (err) {
+      return replyBot(message, 'error', 'Impossible de prendre', err.message);
+    }
+  }
+
+  return replyBot(message, 'warn', 'Utilisation', '`!ticket status`, `!ticket close`, `!ticket claim`, `!ticket reopen`');
 });
 
 registerCommand('ping', 0, async (message) => {
@@ -1773,7 +2761,10 @@ registerCommand('config', 1, async (message, args) => {
     const fields = [];
     fields.push({ name: 'Modules activés', value: Object.keys(guildCfg.featureToggles).filter(k => guildCfg.featureToggles[k]).join(', ') || 'Aucun' });
     fields.push({ name: 'YouTube', value: guildCfg.modules.youtube.enabled ? guildCfg.modules.youtube.channels.length + ' chaînes' : 'désactivé' });
+    fields.push({ name: 'Shorts', value: guildCfg.modules.shorts.enabled ? guildCfg.modules.shorts.channels.length + ' chaînes' : 'désactivé' });
     fields.push({ name: 'Twitch', value: guildCfg.modules.twitch.enabled ? Object.keys(guildCfg.modules.twitch.streamers).length + ' streamers' : 'désactivé' });
+    fields.push({ name: 'Auto Publish', value: guildCfg.modules.autopublish.enabled ? 'activé' : 'désactivé' });
+    fields.push({ name: 'Tickets', value: guildCfg.modules.tickets.enabled ? `<#${guildCfg.modules.tickets.panelChannelId}>` : 'désactivé' });
     fields.push({ name: 'Logs', value: guildCfg.modules.logs.enabled ? `<#${guildCfg.modules.logs.channelId}>` : 'désactivé' });
     fields.push({ name: 'Backups', value: guildCfg.modules.backups.enabled ? (guildCfg.modules.backups.schedule || 'manuelle') : 'désactivé' });
     const embed = new EmbedBuilder().setColor(0x2980b9).setTitle('Configuration du serveur').addFields(fields).setTimestamp();
@@ -1809,7 +2800,10 @@ registerCommand('status', 1, async (message, args) => {
     { name: 'Uptime', value: `<t:${Math.floor(botStartedAt / 1000)}:R>` },
     { name: 'Latency', value: `${Math.round(client.ws.ping)} ms` },
     { name: 'YouTube', value: guildCfg.featureToggles.youtube ? `${guildCfg.modules.youtube.channels.length} chaînes` : 'OFF' },
+    { name: 'Shorts', value: guildCfg.featureToggles.shorts ? `${guildCfg.modules.shorts.channels.length} chaînes` : 'OFF' },
     { name: 'Twitch', value: guildCfg.featureToggles.twitch ? `${Object.keys(guildCfg.modules.twitch.streamers).length} streamers` : 'OFF' },
+    { name: 'Auto Publish', value: guildCfg.featureToggles.autopublish ? (guildCfg.modules.autopublish.enabled ? 'ON' : 'configuré OFF') : 'OFF' },
+    { name: 'Tickets', value: guildCfg.featureToggles.tickets ? (guildCfg.modules.tickets.enabled ? 'ON' : 'configuré OFF') : 'OFF' },
     { name: 'Backups', value: guildCfg.featureToggles.backups ? (guildCfg.modules.backups.schedule || 'manuel') : 'OFF' },
     { name: 'Logs', value: guildCfg.featureToggles.logs ? (guildCfg.modules.logs.channelId ? `<#${guildCfg.modules.logs.channelId}>` : 'non configuré') : 'OFF' },
   );
@@ -1819,6 +2813,8 @@ registerCommand('status', 1, async (message, args) => {
       { name: 'Streamers Twitch suivis', value: Object.keys(guildCfg.modules.twitch.streamers).join(', ') || 'aucun' },
       { name: 'Cooldown YouTube', value: `${guildCfg.modules.youtube.cooldown / 1000}s` },
       { name: 'Cooldown Twitch', value: `${guildCfg.modules.twitch.cooldown / 1000}s` },
+      { name: 'Limite Auto Publish', value: `${AUTOPUBLISH_MAX_PER_HOUR} / heure / serveur` },
+      { name: 'Panel tickets', value: guildCfg.modules.tickets.panelChannelId ? `<#${guildCfg.modules.tickets.panelChannelId}>` : 'non configure' },
       { name: 'Version export', value: '1' },
     );
   }
@@ -1830,7 +2826,8 @@ registerCommand('status', 1, async (message, args) => {
  */
 registerCommand('resetconfig', 3, async (message) => {
   config[message.guild.id] = defaultGuildConfig();
-  state[message.guild.id] = { youtube: {}, twitch: {} };
+  config[message.guild.id] = applyGuildPreset(message.guild.id, config[message.guild.id]);
+  state[message.guild.id] = { youtube: {}, twitch: {}, shorts: {}, tickets: {} };
   persist();
   return message.reply({ embeds: [new EmbedBuilder().setColor(0xe74c3c).setDescription('Configuration réinitialisée. Toutes les listes et paramètres ont été effacés.')] });
 });
@@ -1959,9 +2956,9 @@ registerCommand('patch', 3, async (message, args) => {
 
 function buildHelpCategoryEmbed(category, guild, userLevel, guildCfg) {
   const catalog = {
-    all: ['help', 'ping', 'avatar', 'userinfo', 'serverinfo', 'youtube', 'twitch', 'backup', 'template', 'welcome', 'rules', 'sendembed', 'editembed', 'embedpreset', 'feature', 'setlog', 'status', 'poll', 'suggest', 'analyze', 'import', 'export', 'setlevel', 'listlevels', 'permissions', 'config', 'resetconfig', 'patch'],
+    all: ['help', 'ping', 'avatar', 'userinfo', 'serverinfo', 'youtube', 'shorts', 'twitch', 'autopublish', 'ticketpanel', 'ticket', 'backup', 'template', 'welcome', 'rules', 'sendembed', 'editembed', 'embedpreset', 'feature', 'setlog', 'status', 'poll', 'suggest', 'analyze', 'import', 'export', 'setlevel', 'listlevels', 'permissions', 'config', 'resetconfig', 'patch'],
     core: ['help', 'status', 'config', 'feature', 'setlevel', 'listlevels', 'permissions', 'resetconfig'],
-    notifs: ['youtube', 'twitch', 'welcome', 'setlog'],
+    notifs: ['youtube', 'shorts', 'twitch', 'autopublish', 'ticketpanel', 'ticket', 'welcome', 'setlog'],
     patch: ['patch', 'analyze', 'import', 'export', 'backup', 'template', 'rules'],
     outils: ['ping', 'avatar', 'userinfo', 'serverinfo', 'poll', 'suggest', 'sendembed', 'editembed', 'embedpreset'],
     social: ['welcome', 'rules', 'suggest'],
@@ -1971,7 +2968,7 @@ function buildHelpCategoryEmbed(category, guild, userLevel, guildCfg) {
     .filter((name) => commands[name] && commands[name].level <= userLevel)
     .filter((name) => {
       const modMap = {
-        youtube: 'youtube', twitch: 'twitch', backup: 'backups', template: 'templates', welcome: 'welcome',
+        youtube: 'youtube', shorts: 'shorts', twitch: 'twitch', autopublish: 'autopublish', ticketpanel: 'tickets', ticket: 'tickets', backup: 'backups', template: 'templates', welcome: 'welcome',
         rules: 'rules', setlog: 'logs', poll: 'polls', suggest: 'suggestions', ping: 'utility', avatar: 'utility',
         userinfo: 'utility', serverinfo: 'utility', sendembed: 'embeds', editembed: 'embeds', embedpreset: 'embeds',
       };
@@ -2029,10 +3026,22 @@ registerCommand('help', 0, async (message, args) => {
         desc = "Gère les presets d'embed. Sous-commandes: set, show, list, delete, default.";
         break;
       case 'youtube':
-        desc = 'Gère les notifications YouTube. Sous‑commandes: add <channelId> #salon, remove <channelId>, list.';
+        desc = 'Gère les notifications YouTube (vidéos longues uniquement). Sous‑commandes: add <channelId> #salon, remove <channelId>, list.';
+        break;
+      case 'shorts':
+        desc = 'Gère les notifications YouTube Shorts (vidéos ≤60s). Sous‑commandes: add <channelId> #salon, remove <channelId>, list.';
         break;
       case 'twitch':
         desc = 'Gère les notifications Twitch. Sous‑commandes: add <login> #salon, remove <login>, list.';
+        break;
+      case 'autopublish':
+        desc = 'Publie automatiquement les messages des salons Announcement. Sous-commandes: on, off, status.';
+        break;
+      case 'ticketpanel':
+        desc = 'Publie le panel tickets avec menu deroulant dans le salon configure.';
+        break;
+      case 'ticket':
+        desc = 'Commande de secours pour les tickets. Utilisation: `!ticket status`, `!ticket close`, `!ticket claim`, `!ticket reopen`.';
         break;
       case 'backup':
         desc = 'Gère les sauvegardes automatiques. Sous‑commandes: now, setchannel #salon, schedule daily|weekly, off.';
@@ -2111,9 +3120,115 @@ process.on('uncaughtException', (err) => {
 
 
 
+// ------------------------------------------------------------
+// Slash command adapter helpers
+// ------------------------------------------------------------
+
+/**
+ * Create an adapter object that makes an interaction look like a message
+ * so existing prefix command handlers can be reused for slash commands.
+ */
+function createSlashAdapter(interaction) {
+  let hasReplied = false;
+  return {
+    guild: interaction.guild,
+    member: interaction.member,
+    author: interaction.user,
+    channel: interaction.channel,
+    client: interaction.client,
+    content: '',
+    createdTimestamp: interaction.createdTimestamp,
+    attachments: { size: 0, first() { return undefined; } },
+    mentions: { users: { size: 0, first() { return undefined; } } },
+    async reply(opts) {
+      let result;
+      if (!hasReplied) {
+        hasReplied = true;
+        result = await interaction.editReply(opts);
+      } else {
+        result = await interaction.followUp(opts);
+      }
+      return result;
+    },
+    get _hasReplied() { return hasReplied; },
+  };
+}
+
+/**
+ * Convert slash command options into the (args, rawArgs) format
+ * that existing prefix command handlers expect.
+ */
+function buildSlashArgs(interaction) {
+  const sub = interaction.options.getSubcommand(false);
+  const args = [];
+  const rawParts = [];
+  if (sub) {
+    args.push(sub);
+    rawParts.push(sub);
+  }
+  const data = interaction.options.data;
+  const opts = sub ? (data[0]?.options || []) : data;
+  for (const opt of opts) {
+    if (opt.type === 1 || opt.type === 2) continue; // SUB_COMMAND / SUB_COMMAND_GROUP
+    let formatted;
+    switch (opt.type) {
+      case 6: formatted = `<@${opt.value}>`; break;   // USER
+      case 7: formatted = `<#${opt.value}>`; break;   // CHANNEL
+      case 8: formatted = `<@&${opt.value}>`; break;  // ROLE
+      default: formatted = String(opt.value);
+    }
+    args.push(formatted);
+    rawParts.push(formatted);
+  }
+  return { args, rawArgs: rawParts.join(' ') };
+}
+
+/**
+ * Overrides for commands whose args/rawArgs format doesn't match
+ * the generic mapper output.
+ */
+const SLASH_OVERRIDES = {
+  'poll': (interaction) => {
+    const question = interaction.options.getString('question');
+    const opts = [
+      interaction.options.getString('option1'),
+      interaction.options.getString('option2'),
+      interaction.options.getString('option3'),
+      interaction.options.getString('option4'),
+      interaction.options.getString('option5'),
+    ].filter(Boolean);
+    const combined = [question, ...opts].join(' | ');
+    return { args: combined.split(/\s+/), rawArgs: combined };
+  },
+  'suggest:new': (interaction) => {
+    const content = interaction.options.getString('content');
+    return { args: content.split(/\s+/), rawArgs: content };
+  },
+  'rules:show': () => {
+    return { args: [], rawArgs: '' };
+  },
+  'status': (interaction) => {
+    const verbose = interaction.options.getBoolean('verbose');
+    return { args: verbose ? ['verbose'] : [], rawArgs: verbose ? 'verbose' : '' };
+  },
+  'config': () => {
+    return { args: ['show'], rawArgs: 'show' };
+  },
+};
+
 // On ready, initialise watchers and backup schedules
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Connecté en tant que ${client.user.tag}`);
+
+  // Register slash commands globally
+  try {
+    console.log('[slash] Enregistrement des commandes slash...');
+    await client.application.commands.set(slashCommandDefs);
+    console.log(`[slash] ${slashCommandDefs.length} commandes enregistrées.`);
+  } catch (err) {
+    console.error('[slash] Échec de l\'enregistrement:', err);
+  }
+
   // Start periodic tasks with a configurable polling interval
   setInterval(pollYouTube, POLL_INTERVAL_MS);
   setInterval(pollTwitch, POLL_INTERVAL_MS);
@@ -2124,6 +3239,7 @@ client.once('ready', () => {
     ensureGuildConfig(guild.id);
     scheduleBackups(guild.id);
   }
+  persist();
 });
 
 // On guild member join, send welcome message if configured
@@ -2147,8 +3263,138 @@ async function handleGuildMemberAdd(member) {
 client.on('guildMemberAdd', handleGuildMemberAdd);
 
 client.on('interactionCreate', async (interaction) => {
+  // ---- Slash command handling ----
+  if (interaction.isChatInputCommand()) {
+    const commandName = interaction.commandName;
+
+    await interaction.deferReply();
+
+    // Special: help command (has interactive buttons)
+    if (commandName === 'help') {
+      const category = interaction.options.getString('category') || 'all';
+      const guildCfg = ensureGuildConfig(interaction.guild.id);
+      const userLevel = getUserLevel(interaction.member);
+      const embed = buildHelpCategoryEmbed(category, interaction.guild, userLevel, guildCfg);
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`help:all:${interaction.user.id}`).setLabel('Tout').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`help:core:${interaction.user.id}`).setLabel('Core').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`help:notifs:${interaction.user.id}`).setLabel('Notifs').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`help:patch:${interaction.user.id}`).setLabel('Patch').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`help:outils:${interaction.user.id}`).setLabel('Outils').setStyle(ButtonStyle.Secondary),
+      );
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`help:social:${interaction.user.id}`).setLabel('Social').setStyle(ButtonStyle.Secondary),
+      );
+      return interaction.editReply({ embeds: [embed], components: [row, row2] });
+    }
+
+    // Look up existing prefix command handler
+    const cmdEntry = commands[commandName];
+    if (!cmdEntry) {
+      return interaction.editReply({ content: 'Commande inconnue.' });
+    }
+
+    // Permission check
+    const userLevel = getUserLevel(interaction.member);
+    if (cmdEntry.level > userLevel) {
+      return interaction.editReply({
+        embeds: [new EmbedBuilder().setColor(0xff5555).setDescription("Vous n'avez pas la permission d'utiliser cette commande.")],
+      });
+    }
+
+    // Build args from slash options
+    let { args, rawArgs } = buildSlashArgs(interaction);
+
+    // Apply overrides for commands with non-standard arg formats
+    const sub = interaction.options.getSubcommand(false);
+    const overrideKey = sub ? `${commandName}:${sub}` : commandName;
+    const override = SLASH_OVERRIDES[overrideKey] || SLASH_OVERRIDES[commandName];
+    if (override) {
+      ({ args, rawArgs } = override(interaction));
+    }
+
+    // Create adapter and call existing handler
+    const adapter = createSlashAdapter(interaction);
+    try {
+      await cmdEntry.handler(adapter, args, rawArgs);
+      if (!adapter._hasReplied) {
+        await interaction.editReply({ content: '\u2705' });
+      }
+    } catch (err) {
+      console.error('[slash]', err);
+      const errorEmbed = new EmbedBuilder().setColor(0xe74c3c).setDescription('Une erreur inattendue est survenue.');
+      if (!adapter._hasReplied) {
+        await interaction.editReply({ embeds: [errorEmbed] }).catch(() => {});
+      } else {
+        await interaction.followUp({ embeds: [errorEmbed], ephemeral: true }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket:modal:')) {
+    const guildCfg = ensureGuildConfig(interaction.guild.id);
+    if (!moduleEnabled(guildCfg, 'tickets') || !guildCfg.modules.tickets.enabled) {
+      return interaction.reply({ content: 'Le module tickets est desactive.', ephemeral: true });
+    }
+    const typeId = interaction.customId.split(':')[2];
+    const ticketType = getTicketType(typeId);
+    if (!ticketType) {
+      return interaction.reply({ content: 'Type de ticket inconnu.', ephemeral: true });
+    }
+    const access = canCreateTicket(interaction.member, ticketType, guildCfg.modules.tickets);
+    if (!access.ok) {
+      return interaction.reply({ content: access.reason, ephemeral: true });
+    }
+
+    const answers = ticketType.questions.map(question => ({
+      id: question.id,
+      label: question.placeholder,
+      value: interaction.fields.getTextInputValue(question.id) || '',
+    }));
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const channel = await createTicketChannel(interaction.guild, interaction.member, typeId, answers);
+      return interaction.editReply({ content: `🎫 Ton ticket est pret dans ${channel}.` });
+    } catch (err) {
+      return interaction.editReply({ content: err.message || 'Impossible de creer le ticket.' });
+    }
+  }
+
+  // ---- Button interaction handling ----
   if (!interaction.isButton()) return;
   const [kind, id, arg] = (interaction.customId || '').split(':');
+
+  if (kind === 'ticketopen') {
+    const guildCfg = ensureGuildConfig(interaction.guild.id);
+    if (!moduleEnabled(guildCfg, 'tickets') || !guildCfg.modules.tickets.enabled) {
+      return interaction.reply({ content: 'Le module tickets est desactive.', ephemeral: true });
+    }
+    const typeId = id;
+    const ticketType = getTicketType(typeId);
+    if (!ticketType) {
+      return interaction.reply({ content: 'Type de ticket inconnu.', ephemeral: true });
+    }
+    const access = canCreateTicket(interaction.member, ticketType, guildCfg.modules.tickets);
+    if (!access.ok) {
+      return interaction.reply({ content: access.reason, ephemeral: true });
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`ticket:modal:${typeId}`)
+      .setTitle(`Ticket ${ticketType.label}`.slice(0, 45));
+    const rows = ticketType.questions.slice(0, 5).map((question) => {
+      const input = new TextInputBuilder()
+        .setCustomId(question.id)
+        .setLabel(question.label.slice(0, 45))
+        .setStyle(question.style)
+        .setRequired(question.required)
+        .setPlaceholder(question.placeholder.slice(0, 100));
+      return new ActionRowBuilder().addComponents(input);
+    });
+    modal.addComponents(...rows);
+    return interaction.showModal(modal);
+  }
 
   if (kind === 'help') {
     const category = id;
@@ -2160,6 +3406,24 @@ client.on('interactionCreate', async (interaction) => {
     const member = await interaction.guild.members.fetch(interaction.user.id);
     const level = getUserLevel(member);
     return interaction.update({ embeds: [buildHelpCategoryEmbed(category, interaction.guild, level, guildCfg)] });
+  }
+
+  if (kind === 'ticket') {
+    const tickets = getTicketState(interaction.guild.id);
+    const ticketInfo = tickets[interaction.channel.id];
+    if (!ticketInfo) {
+      return interaction.reply({ content: 'Ce salon nest pas un ticket gere.', ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      if (id === 'close') await closeTicket(interaction.channel, interaction.member);
+      else if (id === 'claim') await claimTicket(interaction.channel, interaction.member);
+      else if (id === 'reopen') await reopenTicket(interaction.channel, interaction.member);
+      else return interaction.editReply({ content: 'Action ticket inconnue.' });
+      return interaction.editReply({ content: 'Action ticket executee.' });
+    } catch (err) {
+      return interaction.editReply({ content: err.message || 'Action ticket impossible.' });
+    }
   }
 
   if (kind === 'poll') {
@@ -2204,8 +3468,9 @@ client.on('interactionCreate', async (interaction) => {
 
 // Process commands
 client.on('messageCreate', async message => {
-  if (message.author.bot) return;
   if (!message.guild) return;
+  await maybeAutoPublishMessage(message);
+  if (message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
 
   const parsed = parseCommandContent(message.content, PREFIX);
