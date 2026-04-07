@@ -8,6 +8,8 @@
     "test": "node --test"
   },
   "dependencies": {
-    "discord.js": "^14.13.0"
+    "discord.js": "^14.13.0",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.2"
   }
 }
